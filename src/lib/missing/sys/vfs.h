@@ -1,6 +1,6 @@
 /*
  * lwan - simple web server
- * Copyright (c) 2012 Leandro A. F. Pereira <leandro@hardinfo.org>
+ * Copyright (c) 2020 Leandro A. F. Pereira <leandro@hardinfo.org>
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -18,42 +18,26 @@
  * USA.
  */
 
-#include_next <limits.h>
-
-#ifndef MISSING_LIMITS_H
-#define MISSING_LIMITS_H
-
-#ifndef PATH_MAX
-# define PATH_MAX 4096
+#if defined(__FreeBSD__) || defined(__OpenBSD__) || defined(__APPLE__)
+#include <sys/mount.h>
+#include <sys/param.h>
+#elif defined(__linux__)
+#include_next <sys/vfs.h>
 #endif
 
-#ifndef OPEN_MAX
-# include <sys/param.h>
-# ifdef NOFILE
-#  define OPEN_MAX NOFILE
-# else
-#  define OPEN_MAX 65535
-# endif
+#ifndef _MISSING_VFS_H_
+#define _MISSING_VFS_H_
+
+#if !defined(HAVE_STATFS)
+struct statfs {
+    int f_type;
+};
+
+int statfs(const char *path, struct statfs *buf);
 #endif
 
-#ifndef OFF_MAX
-# include <sys/types.h>
-#if SIZE_MAX == ULLONG_MAX
-#  define OFF_MAX LLONG_MAX
-#else
-#  define OFF_MAX LONG_MAX
-#endif
+#ifndef TMPFS_MAGIC
+#define TMPFS_MAGIC 0xbebacafe
 #endif
 
-#ifndef PAGE_SIZE
-# include <sys/param.h>
-# ifndef PAGE_SIZE
-#  ifdef EXEC_PAGESIZE
-#   define PAGE_SIZE EXEC_PAGESIZE
-#  else
-#   define PAGE_SIZE 4096
-#  endif
-# endif
-#endif
-
-#endif /* MISSING_LIMITS_H */
+#endif /* _MISSING_VFS_H_ */
