@@ -1,6 +1,6 @@
 /*
- * lwan - simple web server
- * Copyright (c) 2014 Leandro A. F. Pereira <leandro@hardinfo.org>
+ * lwan - web server
+ * Copyright (c) 2014 L. A. F. Pereira <l@tia.mat.br>
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -24,6 +24,7 @@
 #include <string.h>
 
 #include "base64.h"
+#include "lwan-private.h"
 #include "lwan-cache.h"
 #include "lwan-config.h"
 #include "lwan-http-authorize.h"
@@ -35,19 +36,16 @@ struct realm_password_file_t {
 
 static struct cache *realm_password_cache = NULL;
 
-static void fourty_two_and_free(void *str)
+static void zero_and_free(void *str)
 {
     if (LIKELY(str)) {
-        char *s = str;
-        while (*s)
-            *s++ = 42;
-        LWAN_NO_DISCARD(str);
+        lwan_always_bzero(str, strlen(str));
         free(str);
     }
 }
 
 static struct cache_entry *
-create_realm_file(const char *key, void *context __attribute__((unused)))
+create_realm_file(const void *key, void *context __attribute__((unused)))
 {
     struct realm_password_file_t *rpf = malloc(sizeof(*rpf));
     const struct config_line *l;
@@ -56,7 +54,7 @@ create_realm_file(const char *key, void *context __attribute__((unused)))
     if (UNLIKELY(!rpf))
         return NULL;
 
-    rpf->entries = hash_str_new(fourty_two_and_free, fourty_two_and_free);
+    rpf->entries = hash_str_new(zero_and_free, zero_and_free);
     if (UNLIKELY(!rpf->entries))
         goto error_no_close;
 
@@ -89,8 +87,8 @@ create_realm_file(const char *key, void *context __attribute__((unused)))
             if (LIKELY(!err))
                 continue;
 
-            free(username);
-            free(password);
+            zero_and_free(username);
+            zero_and_free(password);
 
             if (err == -EEXIST) {
                 lwan_status_warning(
@@ -107,7 +105,7 @@ create_realm_file(const char *key, void *context __attribute__((unused)))
     }
 
     if (config_last_error(f)) {
-        lwan_status_error("Error on password file \"%s\", line %d: %s", key,
+        lwan_status_error("Error on password file \"%s\", line %d: %s", (char *)key,
                           config_cur_line(f), config_last_error(f));
         goto error;
     }

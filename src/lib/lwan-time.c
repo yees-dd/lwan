@@ -1,6 +1,6 @@
 /*
- * lwan - simple web server
- * Copyright (c) 2017 Leandro A. F. Pereira <leandro@hardinfo.org>
+ * lwan - web server
+ * Copyright (c) 2017 L. A. F. Pereira <l@tia.mat.br>
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -21,29 +21,28 @@
 #include <stdio.h>
 #include <errno.h>
 #include <time.h>
+#include <limits.h>
 
 #include "lwan-private.h"
 #include "int-to-str.h"
 
+static int parse_2_digit_num_no_end_check(const char *str, unsigned int max)
+{
+    static const unsigned int tens[16] = {
+        0, 10, 20, 30, 40, 50, 60, 70, 80, 90, [11 ... 15] = UINT_MAX,
+    };
+    const unsigned int n_tens = (unsigned int)(str[0] - '0');
+    const unsigned int n_ones = (unsigned int)(str[1] - '0');
+    const unsigned int val = tens[n_tens & 15] + n_ones;
+    return UNLIKELY(val > max) ? -EINVAL : (int)val;
+}
+
 static int
 parse_2_digit_num(const char *str, const char end_chr, unsigned int max)
 {
-    unsigned int val;
-
-    if (UNLIKELY(!lwan_char_isdigit(*str)))
+    if (UNLIKELY(str[2] != end_chr))
         return -EINVAL;
-    if (UNLIKELY(!lwan_char_isdigit(*(str + 1))))
-        return -EINVAL;
-    if (UNLIKELY(*(str + 2) != end_chr))
-        return -EINVAL;
-
-    val  = (unsigned int)((*str - '0') * 10);
-    val += (unsigned int)(*(str + 1) - '0');
-
-    if (UNLIKELY(val > max))
-        return -EINVAL;
-
-    return (int)val;
+    return parse_2_digit_num_no_end_check(str, max);
 }
 
 int lwan_parse_rfc_time(const char in[static 30], time_t *out)
@@ -67,7 +66,7 @@ int lwan_parse_rfc_time(const char in[static 30], time_t *out)
     str += 5;
 
     tm.tm_mday = parse_2_digit_num(str, ' ', 31);
-    if (UNLIKELY(tm.tm_mday <= 1))
+    if (UNLIKELY(tm.tm_mday <= 0))
         return -EINVAL;
     str += 3;
 
@@ -88,10 +87,11 @@ int lwan_parse_rfc_time(const char in[static 30], time_t *out)
     }
     str += 4;
 
-    tm.tm_year = parse_int(strndupa(str, 4), -1);
-    if (UNLIKELY(tm.tm_year < 0))
+    int year_hundreds = parse_2_digit_num_no_end_check(str, 21);
+    int year_ones = parse_2_digit_num_no_end_check(str + 2, 99);
+    if (UNLIKELY(year_hundreds < 0 || year_ones < 0))
         return -EINVAL;
-    tm.tm_year -= 1900;
+    tm.tm_year = (year_hundreds * 100 + year_ones) - 1900;
     if (UNLIKELY(tm.tm_year < 0 || tm.tm_year > 1000))
         return -EINVAL;
     str += 5;

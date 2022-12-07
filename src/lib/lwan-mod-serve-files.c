@@ -1,6 +1,6 @@
 /*
- * lwan - simple web server
- * Copyright (c) 2012 Leandro A. F. Pereira <leandro@hardinfo.org>
+ * lwan - web server
+ * Copyright (c) 2012 L. A. F. Pereira <l@tia.mat.br>
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -42,11 +42,11 @@
 
 #include "auto-index-icons.h"
 
-#if defined(HAVE_BROTLI)
+#if defined(LWAN_HAVE_BROTLI)
 #include <brotli/encode.h>
 #endif
 
-#if defined(HAVE_ZSTD)
+#if defined(LWAN_HAVE_ZSTD)
 #include <zstd.h>
 #endif
 
@@ -56,12 +56,12 @@ static const struct lwan_key_value deflate_compression_hdr[] = {
 static const struct lwan_key_value gzip_compression_hdr[] = {
     {"Content-Encoding", "gzip"}, {}
 };
-#if defined(HAVE_BROTLI)
+#if defined(LWAN_HAVE_BROTLI)
 static const struct lwan_key_value br_compression_hdr[] = {
     {"Content-Encoding", "br"}, {}
 };
 #endif
-#if defined(HAVE_ZSTD)
+#if defined(LWAN_HAVE_ZSTD)
 static const struct lwan_key_value zstd_compression_hdr[] = {
     {"Content-Encoding", "zstd"}, {}
 };
@@ -71,6 +71,12 @@ static const int open_mode = O_RDONLY | O_NONBLOCK | O_CLOEXEC;
 
 struct file_cache_entry;
 
+enum serve_files_priv_flags {
+    SERVE_FILES_SERVE_PRECOMPRESSED = 1 << 0,
+    SERVE_FILES_AUTO_INDEX = 1 << 1,
+    SERVE_FILES_AUTO_INDEX_README = 1 << 2,
+};
+
 struct serve_files_priv {
     struct cache *cache;
 
@@ -78,16 +84,14 @@ struct serve_files_priv {
     size_t root_path_len;
     int root_fd;
 
+    enum serve_files_priv_flags flags;
+
     const char *index_html;
     char *prefix;
 
     struct lwan_tpl *directory_list_tpl;
 
     size_t read_ahead;
-
-    bool serve_precompressed_files;
-    bool auto_index;
-    bool auto_index_readme;
 };
 
 struct cache_funcs {
@@ -103,10 +107,10 @@ struct mmap_cache_data {
     struct lwan_value uncompressed;
     struct lwan_value gzip;
     struct lwan_value deflated;
-#if defined(HAVE_BROTLI)
+#if defined(LWAN_HAVE_BROTLI)
     struct lwan_value brotli;
 #endif
-#if defined(HAVE_ZSTD)
+#if defined(LWAN_HAVE_ZSTD)
     struct lwan_value zstd;
 #endif
 };
@@ -121,7 +125,7 @@ struct sendfile_cache_data {
 struct dir_list_cache_data {
     struct lwan_strbuf rendered;
     struct lwan_value deflated;
-#if defined(HAVE_BROTLI)
+#if defined(LWAN_HAVE_BROTLI)
     struct lwan_value brotli;
 #endif
 };
@@ -405,7 +409,7 @@ error_zero_out:
     compressed->len = 0;
 }
 
-#if defined(HAVE_BROTLI)
+#if defined(LWAN_HAVE_BROTLI)
 static void brotli_value(const struct lwan_value *uncompressed,
                          struct lwan_value *brotli,
                          const struct lwan_value *deflated)
@@ -438,7 +442,7 @@ error_zero_out:
 }
 #endif
 
-#if defined(HAVE_ZSTD)
+#if defined(LWAN_HAVE_ZSTD)
 static void zstd_value(const struct lwan_value *uncompressed,
                        struct lwan_value *zstd,
                        const struct lwan_value *deflated)
@@ -471,14 +475,10 @@ error_zero_out:
 static void
 try_readahead(const struct serve_files_priv *priv, int fd, size_t size)
 {
-    if (size > priv->read_ahead)
-        size = priv->read_ahead;
-
-    if (LIKELY(size))
-        lwan_readahead_queue(fd, 0, size);
+    lwan_readahead_queue(fd, 0, LWAN_MIN(size, priv->read_ahead));
 }
 
-static bool is_world_readable(mode_t mode)
+static inline bool is_world_readable(mode_t mode)
 {
     const mode_t world_readable = S_IRUSR | S_IRGRP | S_IROTH;
 
@@ -568,7 +568,7 @@ static bool mmap_init(struct file_cache_entry *ce,
         return false;
     lwan_madvise_queue(md->uncompressed.value, md->uncompressed.len);
 
-    if (LIKELY(priv->serve_precompressed_files)) {
+    if (LIKELY(priv->flags & SERVE_FILES_SERVE_PRECOMPRESSED)) {
         size_t compressed_size;
 
         file_fd = try_open_compressed(path, priv, st, &compressed_size);
@@ -579,10 +579,10 @@ static bool mmap_init(struct file_cache_entry *ce,
 
     md->uncompressed.len = (size_t)st->st_size;
     deflate_value(&md->uncompressed, &md->deflated);
-#if defined(HAVE_BROTLI)
+#if defined(LWAN_HAVE_BROTLI)
     brotli_value(&md->uncompressed, &md->brotli, &md->deflated);
 #endif
-#if defined(HAVE_ZSTD)
+#if defined(LWAN_HAVE_ZSTD)
     zstd_value(&md->uncompressed, &md->zstd, &md->deflated);
 #endif
 
@@ -620,7 +620,7 @@ static bool sendfile_init(struct file_cache_entry *ce,
     }
 
     /* If precompressed files can be served, try opening it */
-    if (LIKELY(priv->serve_precompressed_files)) {
+    if (LIKELY(priv->flags & SERVE_FILES_SERVE_PRECOMPRESSED)) {
         size_t compressed_sz;
         int fd = try_open_compressed(relpath, priv, st, &compressed_sz);
 
@@ -660,46 +660,22 @@ static const char *dirlist_find_readme(struct lwan_strbuf *readme,
 {
     static const char *candidates[] = {"readme", "readme.txt", "read.me",
                                        "README.TXT", "README"};
-    int fd = -1;
 
-    if (!priv->auto_index_readme)
+    if (!(priv->flags & SERVE_FILES_AUTO_INDEX_README))
         return NULL;
 
     for (size_t i = 0; i < N_ELEMENTS(candidates); i++) {
-        char buffer[PATH_MAX];
+        char readme_path[PATH_MAX];
         int r;
 
-        r = snprintf(buffer, PATH_MAX, "%s/%s", full_path, candidates[i]);
+        r = snprintf(readme_path, PATH_MAX, "%s/%s", full_path, candidates[i]);
         if (r < 0 || r >= PATH_MAX)
             continue;
 
-        fd = open(buffer, O_RDONLY | O_CLOEXEC);
-        if (fd < 0)
-            continue;
-
-        while (true) {
-            ssize_t n = read(fd, buffer, sizeof(buffer));
-
-            if (n < 0) {
-                if (errno == EINTR)
-                    continue;
-                goto error;
-            }
-
-            if (!lwan_strbuf_append_str(readme, buffer, (size_t)n))
-                goto error;
-
-            if ((size_t)n < sizeof(buffer))
-                break;
-        }
-
-        close(fd);
-        return lwan_strbuf_get_buffer(readme);
+        if (lwan_strbuf_init_from_file(readme, readme_path))
+            return lwan_strbuf_get_buffer(readme);
     }
 
-error:
-    if (fd >= 0)
-        close(fd);
     return NULL;
 }
 
@@ -734,7 +710,7 @@ static bool dirlist_init(struct file_cache_entry *ce,
         .len = lwan_strbuf_get_length(&dd->rendered),
     };
     deflate_value(&rendered, &dd->deflated);
-#if defined(HAVE_BROTLI)
+#if defined(LWAN_HAVE_BROTLI)
     brotli_value(&rendered, &dd->brotli, &dd->deflated);
 #endif
 
@@ -755,7 +731,8 @@ static bool redir_init(struct file_cache_entry *ce,
 {
     struct redir_cache_data *rd = &ce->redir_cache_data;
 
-    return asprintf(&rd->redir_to, "%s/", get_rel_path(full_path, priv)) >= 0;
+    return asprintf(&rd->redir_to, "%s%s/", priv->prefix,
+                    get_rel_path(full_path, priv)) >= 0;
 }
 
 static const struct cache_funcs *get_funcs(struct serve_files_priv *priv,
@@ -767,11 +744,14 @@ static const struct cache_funcs *get_funcs(struct serve_files_priv *priv,
     char *index_html_path = index_html_path_buf;
 
     if (S_ISDIR(st->st_mode)) {
+        size_t index_html_path_len;
+
         /* It is a directory. It might be the root directory (empty key), or
          * something else.  In either case, tack priv->index_html to the
          * path.  */
         if (*key == '\0') {
             index_html_path = (char *)priv->index_html;
+            index_html_path_len = strlen(index_html_path);
         } else {
             /* Redirect /path to /path/. This is to help cases where there's
              * something like <img src="../foo.png">, so that actually
@@ -784,6 +764,8 @@ static const struct cache_funcs *get_funcs(struct serve_files_priv *priv,
                                priv->index_html);
             if (UNLIKELY(ret < 0 || ret >= PATH_MAX))
                 return NULL;
+
+            index_html_path_len = (size_t)ret;
         }
 
         /* See if it exists. */
@@ -791,7 +773,7 @@ static const struct cache_funcs *get_funcs(struct serve_files_priv *priv,
             if (UNLIKELY(errno != ENOENT))
                 return NULL;
 
-            if (LIKELY(priv->auto_index)) {
+            if (LIKELY(priv->flags & SERVE_FILES_AUTO_INDEX)) {
                 /* If it doesn't, we want to generate a directory list. */
                 return &dirlist_funcs;
             }
@@ -805,10 +787,7 @@ static const struct cache_funcs *get_funcs(struct serve_files_priv *priv,
             return NULL;
 
         /* If it does, we want its full path. */
-        /* FIXME: Use strlcpy() here instead of calling strlen()? */
-        if (UNLIKELY(priv->root_path_len +
-                         strlen(index_html_path) + 1 >=
-                     PATH_MAX))
+        if (UNLIKELY(priv->root_path_len + index_html_path_len + 1 >= PATH_MAX))
             return NULL;
 
         strncpy(full_path + priv->root_path_len, index_html_path,
@@ -861,7 +840,7 @@ static void destroy_cache_entry(struct cache_entry *entry,
     free(fce);
 }
 
-static struct cache_entry *create_cache_entry(const char *key, void *context)
+static struct cache_entry *create_cache_entry(const void *key, void *context)
 {
     struct serve_files_priv *priv = context;
     struct file_cache_entry *fce;
@@ -905,10 +884,10 @@ static void mmap_free(struct file_cache_entry *fce)
     if (md->gzip.value)
         munmap(md->gzip.value, md->gzip.len);
     free(md->deflated.value);
-#if defined(HAVE_BROTLI)
+#if defined(LWAN_HAVE_BROTLI)
     free(md->brotli.value);
 #endif
-#if defined(HAVE_ZSTD)
+#if defined(LWAN_HAVE_ZSTD)
     free(md->zstd.value);
 #endif
 }
@@ -929,7 +908,7 @@ static void dirlist_free(struct file_cache_entry *fce)
 
     lwan_strbuf_free(&dd->rendered);
     free(dd->deflated.value);
-#if defined(HAVE_BROTLI)
+#if defined(LWAN_HAVE_BROTLI)
     free(dd->brotli.value);
 #endif
 }
@@ -1026,10 +1005,15 @@ static void *serve_files_create(const char *prefix, void *args)
     priv->root_fd = root_fd;
     priv->index_html =
         settings->index_html ? settings->index_html : "index.html";
-    priv->serve_precompressed_files = settings->serve_precompressed_files;
-    priv->auto_index = settings->auto_index;
-    priv->auto_index_readme = settings->auto_index_readme;
+
     priv->read_ahead = settings->read_ahead;
+
+    if (settings->serve_precompressed_files)
+        priv->flags |= SERVE_FILES_SERVE_PRECOMPRESSED;
+    if (settings->auto_index)
+        priv->flags |= SERVE_FILES_AUTO_INDEX;
+    if (settings->auto_index_readme)
+        priv->flags |= SERVE_FILES_AUTO_INDEX_README;
 
     return priv;
 
@@ -1265,7 +1249,7 @@ mmap_best_data(struct lwan_request *request,
 
     *header = NULL;
 
-#if defined(HAVE_ZSTD)
+#if defined(LWAN_HAVE_ZSTD)
     if (md->zstd.len && md->zstd.len < best->len &&
         accepts_encoding(request, REQUEST_ACCEPT_ZSTD)) {
         best = &md->zstd;
@@ -1273,7 +1257,7 @@ mmap_best_data(struct lwan_request *request,
     }
 #endif
 
-#if defined(HAVE_BROTLI)
+#if defined(LWAN_HAVE_BROTLI)
     if (md->brotli.len && md->brotli.len < best->len &&
         accepts_encoding(request, REQUEST_ACCEPT_BROTLI)) {
         best = &md->brotli;
@@ -1327,7 +1311,7 @@ static enum lwan_http_status dirlist_serve(struct lwan_request *request,
     const char *icon = lwan_request_get_query_param(request, "icon");
 
     if (!icon) {
-#if defined(HAVE_BROTLI)
+#if defined(LWAN_HAVE_BROTLI)
         if (dd->brotli.len && accepts_encoding(request, REQUEST_ACCEPT_BROTLI)) {
             return serve_value_ok(request, fce->mime_type, &dd->brotli,
                                   br_compression_hdr);

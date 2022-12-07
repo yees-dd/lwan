@@ -1,6 +1,6 @@
 /*
- * lwan - simple web server
- * Copyright (c) 2012 Leandro A. F. Pereira <leandro@hardinfo.org>
+ * lwan - web server
+ * Copyright (c) 2012 L. A. F. Pereira <l@tia.mat.br>
  *
  * SQL query is copied from freegeoip.go
  * Copyright (c) 2013 Alexandre Fiori
@@ -71,7 +71,7 @@ static const struct lwan_var_descriptor template_descriptor[] = {
 };
 
 static const char json_template_str[] =
-    "{{callback?}}{{callback}}({{/callback?}}"
+    "{{callback?}}alert('Using JSONP, especially with a third-party service, is insecure. Stop using this ASAP.');{{callback}}({{/callback?}}"
     "{"
     "\"country_code\":\"{{country.code}}\","
     "\"country_name\":\"{{country.name}}\","
@@ -233,7 +233,7 @@ static ALWAYS_INLINE char *text_column_helper(sqlite3_stmt *stmt, int ind)
     return value ? strdup((char *)value) : NULL;
 }
 
-static struct cache_entry *create_ipinfo(const char *key,
+static struct cache_entry *create_ipinfo(const void *key,
                                          void *context __attribute__((unused)))
 {
     sqlite3_stmt *stmt;
@@ -291,7 +291,7 @@ end_no_finalize:
 }
 
 #if QUERIES_PER_HOUR != 0
-static struct cache_entry *create_query_limit(const char *key
+static struct cache_entry *create_query_limit(const void *key
                                               __attribute__((unused)),
                                               void *context
                                               __attribute__((unused)))

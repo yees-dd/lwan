@@ -1,6 +1,6 @@
 /*
- * lwan - simple web server
- * Copyright (c) 2018 Leandro A. F. Pereira <leandro@hardinfo.org>
+ * lwan - web server
+ * Copyright (c) 2018 L. A. F. Pereira <l@tia.mat.br>
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -28,7 +28,7 @@ static struct lwan_pubsub_topic *chat;
 
 /* This is a write-only sample of the API: it just sends random integers
  * over a WebSockets connection. */
-LWAN_HANDLER(ws_write)
+LWAN_HANDLER_ROUTE(ws_write, "/ws-write")
 {
     enum lwan_http_status status = lwan_request_websocket_upgrade(request);
 
@@ -37,7 +37,7 @@ LWAN_HANDLER(ws_write)
 
     while (true) {
         lwan_strbuf_printf(response->buffer, "Some random integer: %d", rand());
-        lwan_response_websocket_write(request);
+        lwan_response_websocket_write_text(request);
         lwan_request_sleep(request, 1000);
     }
 
@@ -52,7 +52,7 @@ static void free_strbuf(void *data)
 /* This is a slightly more featured echo server that tells how many seconds
  * passed since the last message has been received, and keeps sending it back
  * again and again. */
-LWAN_HANDLER(ws_read)
+LWAN_HANDLER_ROUTE(ws_read, "/ws-read")
 {
     enum lwan_http_status status = lwan_request_websocket_upgrade(request);
     struct lwan_strbuf *last_msg_recv;
@@ -78,7 +78,7 @@ LWAN_HANDLER(ws_read)
                                seconds_since_last_msg,
                                (int)lwan_strbuf_get_length(last_msg_recv),
                                lwan_strbuf_get_buffer(last_msg_recv));
-            lwan_response_websocket_write(request);
+            lwan_response_websocket_write_text(request);
 
             lwan_request_sleep(request, 1000);
             seconds_since_last_msg++;
@@ -121,13 +121,14 @@ static void pub_depart_message(void *data1, void *data2)
     lwan_pubsub_publish((struct lwan_pubsub_topic *)data1, buffer, (size_t)r);
 }
 
-LWAN_HANDLER(ws_chat)
+LWAN_HANDLER_ROUTE(ws_chat, "/ws-chat")
 {
     struct lwan_pubsub_subscriber *sub;
     struct lwan_pubsub_msg *msg;
     enum lwan_http_status status;
     static int total_user_count;
     int user_id;
+    uint64_t sleep_time = 1000;
 
     sub = lwan_pubsub_subscribe(chat);
     if (!sub)
@@ -142,7 +143,7 @@ LWAN_HANDLER(ws_chat)
 
     lwan_strbuf_printf(response->buffer, "*** Welcome to the chat, User%d!\n",
                        user_id);
-    lwan_response_websocket_write(request);
+    lwan_response_websocket_write_text(request);
 
     coro_defer2(request->conn->coro, pub_depart_message, chat,
                 (void *)(intptr_t)user_id);
@@ -165,10 +166,20 @@ LWAN_HANDLER(ws_chat)
                  * happens. */
                 lwan_pubsub_msg_done(msg);
 
-                lwan_response_websocket_write(request);
+                lwan_response_websocket_write_text(request);
+                sleep_time = 500;
             }
 
-            lwan_request_sleep(request, 1000);
+            lwan_request_sleep(request, sleep_time);
+
+            /* We're receiving a lot of messages, wait up to 1s (500ms in the loop
+             * above, and 500ms in the increment below). Otherwise, wait 500ms every
+             * time we return from lwan_request_sleep() until we reach 8s.  This way,
+             * if a chat is pretty busy, we'll have a lag of at least 1s -- which is
+             * probably fine; if it's not busy, we can sleep a bit more and conserve
+             * some resources. */
+            if (sleep_time <= 8000)
+                sleep_time += 500;
             break;
 
         case 0: /* We got something! Copy it to echo it back */
@@ -186,7 +197,7 @@ out:
     __builtin_unreachable();
 }
 
-LWAN_HANDLER(index)
+LWAN_HANDLER_ROUTE(index, "/")
 {
     static const char message[] =
         "<html>\n"
@@ -265,23 +276,10 @@ LWAN_HANDLER(index)
 
 int main(void)
 {
-    const struct lwan_url_map default_map[] = {
-        {.prefix = "/ws-write", .handler = LWAN_HANDLER_REF(ws_write)},
-        {.prefix = "/ws-read", .handler = LWAN_HANDLER_REF(ws_read)},
-        {.prefix = "/ws-chat", .handler = LWAN_HANDLER_REF(ws_chat)},
-        {.prefix = "/", .handler = LWAN_HANDLER_REF(index)},
-        {},
-    };
-    struct lwan l;
-
-    lwan_init(&l);
-
     chat = lwan_pubsub_new_topic();
 
-    lwan_set_url_map(&l, default_map);
-    lwan_main_loop(&l);
+    lwan_main();
 
-    lwan_shutdown(&l);
     lwan_pubsub_free_topic(chat);
 
     return 0;

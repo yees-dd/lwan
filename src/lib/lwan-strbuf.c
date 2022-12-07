@@ -1,6 +1,6 @@
 /*
- * lwan - simple web server
- * Copyright (c) 2012 Leandro A. F. Pereira <leandro@hardinfo.org>
+ * lwan - web server
+ * Copyright (c) 2012 L. A. F. Pereira <l@tia.mat.br>
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -19,15 +19,20 @@
  */
 
 #define _GNU_SOURCE
+#include <errno.h>
+#include <fcntl.h>
 #include <limits.h>
 #include <stdarg.h>
+#include <stddef.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
 
 #include "lwan-private.h"
 
 static const unsigned int BUFFER_MALLOCD = 1 << 0;
 static const unsigned int STRBUF_MALLOCD = 1 << 1;
+static const unsigned int BUFFER_FIXED = 1 << 2;
 
 static inline size_t align_size(size_t unaligned_size)
 {
@@ -41,6 +46,9 @@ static inline size_t align_size(size_t unaligned_size)
 
 static bool grow_buffer_if_needed(struct lwan_strbuf *s, size_t size)
 {
+    if (s->flags & BUFFER_FIXED)
+        return size < s->capacity;
+
     if (!(s->flags & BUFFER_MALLOCD)) {
         const size_t aligned_size = align_size(LWAN_MAX(size + 1, s->used));
         if (UNLIKELY(!aligned_size))
@@ -61,13 +69,28 @@ static bool grow_buffer_if_needed(struct lwan_strbuf *s, size_t size)
     }
 
     if (UNLIKELY(s->capacity < size)) {
+        char *buffer;
         const size_t aligned_size = align_size(size + 1);
+
         if (UNLIKELY(!aligned_size))
             return false;
 
-        char *buffer = realloc(s->buffer, aligned_size);
-        if (UNLIKELY(!buffer))
-            return false;
+        if (s->used == 0) {
+            /* Avoid memcpy() inside realloc() if we were not using the
+             * allocated buffer at this point.  */
+            buffer = malloc(aligned_size);
+
+            if (UNLIKELY(!buffer))
+                return false;
+
+            free(s->buffer);
+            buffer[0] = '\0';
+        } else {
+            buffer = realloc(s->buffer, aligned_size);
+
+            if (UNLIKELY(!buffer))
+                return false;
+        }
 
         s->buffer = buffer;
         s->capacity = aligned_size;
@@ -93,6 +116,23 @@ bool lwan_strbuf_init_with_size(struct lwan_strbuf *s, size_t size)
     return true;
 }
 
+bool lwan_strbuf_init_with_fixed_buffer(struct lwan_strbuf *s,
+                                        void *buffer,
+                                        size_t size)
+{
+    if (UNLIKELY(!s))
+        return false;
+
+    *s = (struct lwan_strbuf) {
+        .capacity = size,
+        .used = 0,
+        .buffer = buffer,
+        .flags = BUFFER_FIXED,
+    };
+
+    return true;
+}
+
 ALWAYS_INLINE bool lwan_strbuf_init(struct lwan_strbuf *s)
 {
     return lwan_strbuf_init_with_size(s, 0);
@@ -103,6 +143,21 @@ struct lwan_strbuf *lwan_strbuf_new_with_size(size_t size)
     struct lwan_strbuf *s = malloc(sizeof(*s));
 
     if (UNLIKELY(!lwan_strbuf_init_with_size(s, size))) {
+        free(s);
+
+        return NULL;
+    }
+
+    s->flags |= STRBUF_MALLOCD;
+
+    return s;
+}
+
+struct lwan_strbuf *lwan_strbuf_new_with_fixed_buffer(size_t size)
+{
+    struct lwan_strbuf *s = malloc(sizeof(*s) + size + 1);
+
+    if (UNLIKELY(!lwan_strbuf_init_with_fixed_buffer(s, s + 1, size))) {
         free(s);
 
         return NULL;
@@ -140,8 +195,10 @@ void lwan_strbuf_free(struct lwan_strbuf *s)
 {
     if (UNLIKELY(!s))
         return;
-    if (s->flags & BUFFER_MALLOCD)
+    if (s->flags & BUFFER_MALLOCD) {
+        assert(!(s->flags & BUFFER_FIXED));
         free(s->buffer);
+    }
     if (s->flags & STRBUF_MALLOCD)
         free(s);
 }
@@ -176,7 +233,7 @@ bool lwan_strbuf_set_static(struct lwan_strbuf *s1, const char *s2, size_t sz)
 
     s1->buffer = (char *)s2;
     s1->used = s1->capacity = sz;
-    s1->flags &= ~BUFFER_MALLOCD;
+    s1->flags &= ~(BUFFER_MALLOCD | BUFFER_FIXED);
 
     return true;
 }
@@ -211,16 +268,26 @@ internal_printf(struct lwan_strbuf *s1,
     return success;
 }
 
+bool lwan_strbuf_vprintf(struct lwan_strbuf *s, const char *fmt, va_list ap)
+{
+    return internal_printf(s, lwan_strbuf_set, fmt, ap);
+}
+
 bool lwan_strbuf_printf(struct lwan_strbuf *s, const char *fmt, ...)
 {
     bool could_printf;
     va_list values;
 
     va_start(values, fmt);
-    could_printf = internal_printf(s, lwan_strbuf_set, fmt, values);
+    could_printf = lwan_strbuf_vprintf(s, fmt, values);
     va_end(values);
 
     return could_printf;
+}
+
+bool lwan_strbuf_append_vprintf(struct lwan_strbuf *s, const char *fmt, va_list ap)
+{
+    return internal_printf(s, lwan_strbuf_append_str, fmt, ap);
 }
 
 bool lwan_strbuf_append_printf(struct lwan_strbuf *s, const char *fmt, ...)
@@ -229,7 +296,7 @@ bool lwan_strbuf_append_printf(struct lwan_strbuf *s, const char *fmt, ...)
     va_list values;
 
     va_start(values, fmt);
-    could_printf = internal_printf(s, lwan_strbuf_append_str, fmt, values);
+    could_printf = lwan_strbuf_append_vprintf(s, fmt, values);
     va_end(values);
 
     return could_printf;
@@ -262,6 +329,16 @@ void lwan_strbuf_reset(struct lwan_strbuf *s)
     s->used = 0;
 }
 
+void lwan_strbuf_reset_trim(struct lwan_strbuf *s, size_t trim_thresh)
+{
+    if (s->flags & BUFFER_MALLOCD && s->capacity > trim_thresh) {
+        free(s->buffer);
+        s->flags &= ~BUFFER_MALLOCD;
+    }
+
+    return lwan_strbuf_reset(s);
+}
+
 /* This function is quite dangerous, so the prototype is only in lwan-private.h */
 char *lwan_strbuf_extend_unsafe(struct lwan_strbuf *s, size_t by)
 {
@@ -272,4 +349,60 @@ char *lwan_strbuf_extend_unsafe(struct lwan_strbuf *s, size_t by)
     s->used += by;
 
     return s->buffer + prev_used;
+}
+
+bool lwan_strbuf_init_from_file(struct lwan_strbuf *s, const char *path)
+{
+    int fd = open(path, O_RDONLY | O_CLOEXEC);
+    struct stat st;
+
+    if (UNLIKELY(fd < 0))
+        return false;
+
+    if (UNLIKELY(fstat(fd, &st) < 0))
+        goto error;
+
+    if (UNLIKELY(!lwan_strbuf_init(s)))
+        goto error;
+
+    if (UNLIKELY(!grow_buffer_if_needed(s, (size_t)st.st_size)))
+        goto error;
+
+    s->used = (size_t)st.st_size;
+
+    for (char *buffer = s->buffer; st.st_size; ) {
+        ssize_t n_read = read(fd, buffer, (size_t)st.st_size);
+
+        if (UNLIKELY(n_read < 0)) {
+            if (errno == EINTR)
+                continue;
+            goto error;
+        }
+
+        buffer += n_read;
+        st.st_size -= (off_t)n_read;
+    }
+
+    close(fd);
+    return true;
+
+error:
+    close(fd);
+    return false;
+}
+
+struct lwan_strbuf *lwan_strbuf_new_from_file(const char *path)
+{
+    struct lwan_strbuf *strbuf = malloc(sizeof(*strbuf));
+
+    if (!strbuf)
+        return NULL;
+
+    if (lwan_strbuf_init_from_file(strbuf, path)) {
+        strbuf->flags |= STRBUF_MALLOCD;
+        return strbuf;
+    }
+
+    free(strbuf);
+    return NULL;
 }

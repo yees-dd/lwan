@@ -1,6 +1,6 @@
 /*
- * lwan - simple web server
- * Copyright (c) 2020 Leandro A. F. Pereira <leandro@hardinfo.org>
+ * lwan - web server
+ * Copyright (c) 2020 L. A. F. Pereira <l@tia.mat.br>
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -29,7 +29,7 @@
 
 static void close_socket(void *data) { close((int)(intptr_t)data); }
 
-LWAN_HANDLER(asyncawait)
+LWAN_HANDLER_ROUTE(asyncawait, "/")
 {
     int fd;
     struct sockaddr_in addr;
@@ -57,20 +57,4 @@ LWAN_HANDLER(asyncawait)
     return HTTP_OK;
 }
 
-int main(void)
-{
-    const struct lwan_url_map default_map[] = {
-        {.prefix = "/", .handler = LWAN_HANDLER_REF(asyncawait)},
-        {},
-    };
-    struct lwan l;
-
-    lwan_init(&l);
-
-    lwan_set_url_map(&l, default_map);
-    lwan_main_loop(&l);
-
-    lwan_shutdown(&l);
-
-    return 0;
-}
+int main(void) { return lwan_main(); }

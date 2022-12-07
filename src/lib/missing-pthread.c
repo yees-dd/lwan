@@ -1,6 +1,6 @@
 /*
- * lwan - simple web server
- * Copyright (c) 2018 Leandro A. F. Pereira <leandro@hardinfo.org>
+ * lwan - web server
+ * Copyright (c) 2018 L. A. F. Pereira <l@tia.mat.br>
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -28,7 +28,7 @@
 
 #include "lwan-private.h"
 
-#ifndef HAVE_PTHREADBARRIER
+#ifndef LWAN_HAVE_PTHREADBARRIER
 #define PTHREAD_BARRIER_SERIAL_THREAD -1
 
 int

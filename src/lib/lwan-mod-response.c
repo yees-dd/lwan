@@ -1,6 +1,6 @@
 /*
- * lwan - simple web server
- * Copyright (c) 2017 Leandro A. F. Pereira <leandro@hardinfo.org>
+ * lwan - web server
+ * Copyright (c) 2017 L. A. F. Pereira <l@tia.mat.br>
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -14,13 +14,14 @@
  *
  * You should have received a copy of the GNU General Public License
  * along with this program; if not, write to the Free Software
- * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
+ * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301,
+ * USA.
  */
 
-#include <string.h>
 #include <stdlib.h>
+#include <string.h>
 
-#include "lwan.h"
+#include "lwan-private.h"
 #include "lwan-mod-response.h"
 
 static enum lwan_http_status
@@ -36,6 +37,14 @@ static void *response_create(const char *prefix __attribute__((unused)),
 {
     struct lwan_response_settings *settings = instance;
 
+    const char *valid_code =
+        lwan_http_status_as_string_with_code(settings->code);
+    if (!strncmp(valid_code, "999 ", 4)) {
+        lwan_status_error("Code %d isn't a known HTTP status code",
+                          settings->code);
+        return NULL;
+    }
+
     return (void *)settings->code;
 }
 
@@ -49,15 +58,15 @@ static void *response_create_from_hash(const char *prefix,
         return NULL;
     }
 
-    struct lwan_response_settings settings = {
-        .code = (enum lwan_http_status)parse_int(code, 999)
-    };
-
-    if (settings.code == 999) {
-        lwan_status_error("Unknown error code: %s", code);
+    int code_as_int = parse_int(code, -1);
+    if (code_as_int < 0) {
+        lwan_status_error("Couldn't parse `code` as an integer");
         return NULL;
     }
 
+    struct lwan_response_settings settings = {
+        .code = (enum lwan_http_status)code_as_int,
+    };
     return response_create(prefix, &settings);
 }
 

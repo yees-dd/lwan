@@ -1,6 +1,6 @@
 /*
- * lwan - simple web server
- * Copyright (c) 2012, 2013 Leandro A. F. Pereira <leandro@hardinfo.org>
+ * lwan - web server
+ * Copyright (c) 2012, 2013 L. A. F. Pereira <l@tia.mat.br>
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -22,9 +22,9 @@
 #include <string.h>
 #include <stdlib.h>
 
-#if defined(HAVE_BROTLI)
+#if defined(LWAN_HAVE_BROTLI)
 #include <brotli/decode.h>
-#elif defined(HAVE_ZSTD)
+#elif defined(LWAN_HAVE_ZSTD)
 #include <zstd.h>
 #else
 #include <zlib.h>
@@ -46,7 +46,7 @@ void lwan_tables_init(void)
     lwan_status_debug("Uncompressing MIME type table: %u->%u bytes, %d entries",
                       MIME_COMPRESSED_LEN, MIME_UNCOMPRESSED_LEN, MIME_ENTRIES);
 
-#if defined(HAVE_BROTLI)
+#if defined(LWAN_HAVE_BROTLI)
     size_t uncompressed_length = MIME_UNCOMPRESSED_LEN;
     BrotliDecoderResult ret;
 
@@ -55,7 +55,7 @@ void lwan_tables_init(void)
                                   uncompressed_mime_entries);
     if (ret != BROTLI_DECODER_RESULT_SUCCESS)
         lwan_status_critical("Error while uncompressing table with Brotli");
-#elif defined(HAVE_ZSTD)
+#elif defined(LWAN_HAVE_ZSTD)
     size_t uncompressed_length =
         ZSTD_decompress(uncompressed_mime_entries, MIME_UNCOMPRESSED_LEN,
                         mime_entries_compressed, MIME_COMPRESSED_LEN);
@@ -98,7 +98,7 @@ void lwan_tables_init(void)
     assert(streq(lwan_determine_mime_type_for_file_name(".gif"),
                  "image/gif"));
     assert(streq(lwan_determine_mime_type_for_file_name(".JS"),
-                 "application/javascript"));
+                 "text/javascript"));
     assert(streq(lwan_determine_mime_type_for_file_name(".BZ2"),
                  "application/x-bzip2"));
 }
@@ -129,21 +129,27 @@ lwan_determine_mime_type_for_file_name(const char *file_name)
     case STR4_INT_L('.','g','i','f'): return "image/gif";
     case STR4_INT_L('.','h','t','m'): return "text/html";
     case STR4_INT_L('.','j','p','g'): return "image/jpeg";
-    case STR4_INT_L('.','j','s',' '): return "application/javascript";
+    case STR4_INT_L('.','j','s',' '): return "text/javascript";
     case STR4_INT_L('.','p','n','g'): return "image/png";
     case STR4_INT_L('.','t','x','t'): return "text/plain";
     }
 
     if (LIKELY(*last_dot)) {
-        char key[9];
+        uint64_t key;
         const unsigned char *extension;
 
-        strncpy(key, last_dot + 1, 8);
-        key[8] = '\0';
-        for (char *p = key; *p; p++)
-            *p |= 0x20;
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wstringop-truncation"
+        /* Data is stored with NULs on strings up to 7 chars, and no NULs
+         * for 8-char strings, because that's implicit.  So truncation is
+         * intentional here: comparison in compare_mime_entry() uses
+         * strncmp(..., 8), so even if NUL isn't present, it'll stop at the
+         * right place.  */
+        strncpy((char *)&key, last_dot + 1, 8);
+#pragma GCC diagnostic pop
+        key &= ~0x2020202020202020ull;
 
-        extension = bsearch(key, uncompressed_mime_entries, MIME_ENTRIES, 8,
+        extension = bsearch(&key, uncompressed_mime_entries, MIME_ENTRIES, 8,
                             compare_mime_entry);
         if (LIKELY(extension))
             return mime_types[(extension - uncompressed_mime_entries) / 8];

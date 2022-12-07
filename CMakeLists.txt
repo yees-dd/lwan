@@ -41,7 +41,8 @@ endif ()
 
 foreach (pc_file luajit lua lua51 lua5.1 lua-5.1)
 	if (${pc_file} STREQUAL "luajit")
-		pkg_check_modules(LUA luajit>=2.0 luajit<=2.0.999)
+		pkg_check_modules(LUA luajit>=2.0 luajit<2.2)
+		set(LWAN_HAVE_LUA_JIT 1)
 	else ()
 		pkg_check_modules(LUA ${pc_file}>=5.1.0 ${pc_file}<=5.1.999)
 	endif ()
@@ -55,39 +56,56 @@ if (NOT LUA_FOUND)
 	message(STATUS "Disabling Lua support")
 else ()
 	message(STATUS "Building with Lua support using ${LUA_LIBRARIES}")
-	set(HAVE_LUA 1)
+	set(LWAN_HAVE_LUA 1)
 endif ()
 
-pkg_check_modules(BROTLI libbrotlienc libbrotlidec libbrotlicommon)
+option(ENABLE_BROTLI "Enable support for brotli" "ON")
+if (ENABLE_BROTLI)
+	pkg_check_modules(BROTLI libbrotlienc libbrotlidec libbrotlicommon)
+endif ()
 if (BROTLI_FOUND)
 	list(APPEND ADDITIONAL_LIBRARIES "${BROTLI_LDFLAGS}")
 	if (NOT BROTLI_INCLUDE_DIRS STREQUAL "")
 		include_directories(${BROTLI_INCLUDE_DIRS})
 	endif ()
-	set(HAVE_BROTLI 1)
+	set(LWAN_HAVE_BROTLI 1)
 endif ()
 
-pkg_check_modules(ZSTD libzstd)
+option(ENABLE_ZSTD "Enable support for zstd" "ON")
+if (ENABLE_ZSTD)
+	pkg_check_modules(ZSTD libzstd)
+endif ()
 if (ZSTD_FOUND)
 	list(APPEND ADDITIONAL_LIBRARIES "${ZSTD_LDFLAGS}")
 	if (NOT ZSTD_INCLUDE_DIRS STREQUAL "")
 		include_directories(${ZSTD_INCLUDE_DIRS})
 	endif ()
-	set(HAVE_ZSTD 1)
+	set(LWAN_HAVE_ZSTD 1)
 endif ()
 
-if (CMAKE_SYSTEM_PROCESSOR MATCHES "^arm")
-	message(STATUS "${CMAKE_SYSTEM_PROCESSOR} processor detected, looking for libucontext")
+option(ENABLE_TLS "Enable support for TLS (Linux-only)" "ON")
+if (ENABLE_TLS)
+	check_include_file(linux/tls.h LWAN_HAVE_LINUX_TLS_H)
+	if (LWAN_HAVE_LINUX_TLS_H)
+		# TLS support requires Linux, as Lwan uses the kTLS flavor
+		# only supported there.
+		# TODO: Try using BearSSL instead of mbedTLS and only link
+		# against things that are absolutely necessary to perform
+		# a TLS 1.2 handshake to inform the kernel about the keys.
+		find_library(MBEDTLS NAMES mbedtls)
+		if (NOT ${MBEDTLS} STREQUAL "MBEDTLS-NOTFOUND")
+			find_library(MBEDTLS_CRYPTO NAMES mbedcrypto REQUIRED)
+			find_library(MBEDTLS_X509 NAMES mbedx509 REQUIRED)
 
-	find_library(LIBUCONTEXT_LIBRARY NAMES libucontext.a)
-	if (LIBUCONTEXT_LIBRARY)
-		message(STATUS "libucontext found, using it for context switching routines")
-		list(APPEND ADDITIONAL_LIBRARIES "${LIBUCONTEXT_LIBRARY}")
+			message(STATUS "Building with Linux kTLS + mbedTLS at ${MBEDTLS}")
+			set(LWAN_HAVE_MBEDTLS 1)
+			list(APPEND ADDITIONAL_LIBRARIES ${MBEDTLS} ${MBEDTLS_CRYPTO} ${MBEDTLS_X509})
+		else ()
+			message(STATUS "mbedTLS not found: not building with TLS support")
+		endif ()
 	else ()
-		message(STATUS "Trying to use libc context switching; this might not work!")
+		message(STATUS "<linux/tls.h> not found: not building with TLS support")
 	endif ()
-else ()
-	message(STATUS "Using built-in context switching routines for ${CMAKE_SYSTEM_PROCESSOR} processors")
 endif ()
 
 option(USE_ALTERNATIVE_MALLOC "Use alternative malloc implementations" "OFF")
@@ -112,6 +130,16 @@ if (USE_ALTERNATIVE_MALLOC)
 	endif ()
 endif ()
 
+###
+# syslog
+option(USE_SYSLOG "Enable syslog" "OFF")
+if (${USE_SYSLOG} STREQUAL "ON" AND LWAN_HAVE_SYSLOG_FUNC)
+    set(LWAN_HAVE_SYSLOG 1)
+endif ()
+if (LWAN_HAVE_SYSLOG)
+    message(STATUS "Using syslog/rsyslog for logging.")
+endif ()
+
 #
 # Look for C library functions
 #
@@ -125,78 +153,90 @@ set(CMAKE_EXTRA_INCLUDE_FILES
 	time.h
 	unistd.h
 	dlfcn.h
+	syslog.h
 )
-check_include_file(linux/capability.h HAVE_LINUX_CAPABILITY)
-check_include_file(sys/auxv.h HAVE_SYS_AUXV)
-check_include_file(sys/epoll.h HAVE_EPOLL)
-check_include_files("sys/time.h;sys/types.h;sys/event.h" HAVE_SYS_EVENT)
-if (HAVE_SYS_EVENT)
+check_include_file(linux/capability.h LWAN_HAVE_LINUX_CAPABILITY)
+check_include_file(sys/auxv.h LWAN_HAVE_SYS_AUXV)
+check_include_file(sys/epoll.h LWAN_HAVE_EPOLL)
+check_include_files("sys/time.h;sys/types.h;sys/event.h" LWAN_HAVE_SYS_EVENT)
+if (LWAN_HAVE_SYS_EVENT)
 	set(CMAKE_EXTRA_INCLUDE_FILES
 		${CMAKE_EXTRA_INCLUDE_FILES}
 		sys/event.h sys/types.h sys/time.h
 	)
-	check_function_exists(kqueue HAVE_KQUEUE)
+	check_function_exists(kqueue LWAN_HAVE_KQUEUE)
 endif ()
-check_include_file(alloca.h HAVE_ALLOCA_H)
-if (HAVE_SYS_AUXV)
+check_include_file(alloca.h LWAN_HAVE_ALLOCA_H)
+if (LWAN_HAVE_SYS_AUXV)
 	set(CMAKE_EXTRA_INCLUDE_FILES
 		${CMAKE_EXTRA_INCLUDE_FILES}
 		sys/auxv.h
 	)
-	check_function_exists(getauxval HAVE_GETAUXVAL)
+	check_function_exists(getauxval LWAN_HAVE_GETAUXVAL)
 endif ()
 
 set(CMAKE_REQUIRED_LIBRARIES ${CMAKE_THREAD_LIBS_INIT})
 
-check_function_exists(get_current_dir_name HAVE_GET_CURRENT_DIR_NAME)
-check_symbol_exists(reallocarray stdlib.h HAVE_REALLOCARRAY)
-check_function_exists(mempcpy HAVE_MEMPCPY)
-check_function_exists(memrchr HAVE_MEMRCHR)
-check_function_exists(pipe2 HAVE_PIPE2)
-check_function_exists(accept4 HAVE_ACCEPT4)
-check_function_exists(readahead HAVE_READAHEAD)
-check_function_exists(mkostemp HAVE_MKOSTEMP)
-check_function_exists(clock_gettime HAVE_CLOCK_GETTIME)
-check_function_exists(pthread_barrier_init HAVE_PTHREADBARRIER)
-check_function_exists(pthread_set_name_np HAVE_PTHREAD_SET_NAME_NP)
-check_function_exists(eventfd HAVE_EVENTFD)
-check_function_exists(posix_fadvise HAVE_POSIX_FADVISE)
-check_function_exists(getentropy HAVE_GETENTROPY)
-check_function_exists(fwrite_unlocked HAVE_FWRITE_UNLOCKED)
-check_function_exists(gettid HAVE_GETTID)
-check_function_exists(secure_getenv HAVE_SECURE_GETENV)
-check_function_exists(statfs HAVE_STATFS)
+check_function_exists(get_current_dir_name LWAN_HAVE_GET_CURRENT_DIR_NAME)
+check_symbol_exists(reallocarray stdlib.h LWAN_HAVE_REALLOCARRAY)
+check_function_exists(mempcpy LWAN_HAVE_MEMPCPY)
+check_function_exists(memrchr LWAN_HAVE_MEMRCHR)
+check_function_exists(pipe2 LWAN_HAVE_PIPE2)
+check_function_exists(accept4 LWAN_HAVE_ACCEPT4)
+check_function_exists(readahead LWAN_HAVE_READAHEAD)
+check_function_exists(mkostemp LWAN_HAVE_MKOSTEMP)
+check_function_exists(clock_gettime LWAN_HAVE_CLOCK_GETTIME)
+check_function_exists(pthread_barrier_init LWAN_HAVE_PTHREADBARRIER)
+check_function_exists(pthread_set_name_np LWAN_HAVE_PTHREAD_SET_NAME_NP)
+check_function_exists(posix_fadvise LWAN_HAVE_POSIX_FADVISE)
+check_function_exists(getentropy LWAN_HAVE_GETENTROPY)
+check_function_exists(fwrite_unlocked LWAN_HAVE_FWRITE_UNLOCKED)
+check_function_exists(gettid LWAN_HAVE_GETTID)
+check_function_exists(secure_getenv LWAN_HAVE_SECURE_GETENV)
+check_function_exists(statfs LWAN_HAVE_STATFS)
+check_function_exists(syslog LWAN_HAVE_SYSLOG_FUNC)
 
 # This is available on -ldl in glibc, but some systems (such as OpenBSD)
 # will bundle these in the C library.  This isn't required for glibc anyway,
 # as there's getauxval(), with a fallback to reading the link
 # /proc/self/exe.
-check_function_exists(dladdr HAVE_DLADDR)
+check_function_exists(dladdr LWAN_HAVE_DLADDR)
 
-if (NOT HAVE_CLOCK_GETTIME AND ${CMAKE_SYSTEM_NAME} MATCHES "Linux")
+if (NOT LWAN_HAVE_CLOCK_GETTIME AND ${CMAKE_SYSTEM_NAME} MATCHES "Linux")
 	list(APPEND ADDITIONAL_LIBRARIES rt)
 endif ()
 
 
 #
-# Ensure compiler is compatible with GNU99 standard
+# Ensure compiler is compatible with GNU11 standard
 #
-check_c_compiler_flag(-std=gnu99 HAVE_STD_GNU99)
-if (NOT HAVE_STD_GNU99)
-	message(FATAL_ERROR "Compiler does not support -std=gnu99. Consider using a newer compiler")
+check_c_compiler_flag(-std=gnu11 LWAN_HAVE_STD_GNU11)
+if (NOT LWAN_HAVE_STD_GNU11)
+	message(FATAL_ERROR "Compiler does not support -std=gnu11. Consider using a newer compiler")
 endif()
 
 
 #
 # Check for GCC builtin functions
 #
-check_c_source_compiles("int main(void) { __builtin_cpu_init(); }" HAVE_BUILTIN_CPU_INIT)
-check_c_source_compiles("int main(void) { __builtin_clzll(0); }" HAVE_BUILTIN_CLZLL)
-check_c_source_compiles("int main(void) { __builtin_fpclassify(0, 0, 0, 0, 0, 0.0f); }" HAVE_BUILTIN_FPCLASSIFY)
-check_c_source_compiles("int main(void) { unsigned long long p; (void)__builtin_mul_overflow(0, 0, &p); }" HAVE_BUILTIN_MUL_OVERFLOW)
-check_c_source_compiles("int main(void) { unsigned long long p; (void)__builtin_add_overflow(0, 0, &p); }" HAVE_BUILTIN_ADD_OVERFLOW)
-check_c_source_compiles("int main(void) { _Static_assert(1, \"\"); }" HAVE_STATIC_ASSERT)
-
+check_c_source_compiles("int main(void) { __builtin_cpu_init(); }" LWAN_HAVE_BUILTIN_CPU_INIT)
+check_c_source_compiles("int main(void) { __builtin_expect_with_probability(0, 0, 0); }" LWAN_HAVE_BUILTIN_EXPECT_PROBABILITY)
+check_c_source_compiles("int main(void) { __builtin_clzll(0); }" LWAN_HAVE_BUILTIN_CLZLL)
+check_c_source_compiles("int main(void) { __builtin_fpclassify(0, 0, 0, 0, 0, 0.0f); }" LWAN_HAVE_BUILTIN_FPCLASSIFY)
+check_c_source_compiles("int main(void) { unsigned long long p; (void)__builtin_mul_overflow(0, 0, &p); }" LWAN_HAVE_BUILTIN_MUL_OVERFLOW)
+check_c_source_compiles("int main(void) { unsigned long long p; (void)__builtin_add_overflow(0, 0, &p); }" LWAN_HAVE_BUILTIN_ADD_OVERFLOW)
+check_c_source_compiles("int main(void) { _Static_assert(1, \"\"); }" LWAN_HAVE_STATIC_ASSERT)
+check_c_source_compiles("#include <linux/filter.h>
+#include <sys/socket.h>
+#include <stddef.h>
+int main(void) {
+	setsockopt(0, SOL_SOCKET, SO_ATTACH_REUSEPORT_CBPF, NULL, 0);
+}" LWAN_HAVE_SO_ATTACH_REUSEPORT_CBPF)
+check_c_source_compiles("#include <sys/socket.h>
+#include <stddef.h>
+int main(void) {
+	setsockopt(0, SOL_SOCKET, SO_INCOMING_CPU, NULL, 0);
+}" LWAN_HAVE_SO_INCOMING_CPU)
 
 #
 # Look for Valgrind header
@@ -206,16 +246,19 @@ if (VALGRIND_INCLUDE_DIR)
 	message(STATUS "Building with Valgrind support")
 	include_directories(${VALGRIND_INCLUDE_DIR})
 
-	set(HAVE_VALGRIND 1)
+	set(LWAN_HAVE_VALGRIND 1)
 else ()
 	message(STATUS "Valgrind headers not found -- disabling valgrind support")
 endif()
 
-enable_c_flag_if_avail(-mtune=native C_FLAGS_REL HAVE_MTUNE_NATIVE)
-enable_c_flag_if_avail(-march=native C_FLAGS_REL HAVE_MARCH_NATIVE)
+option(MTUNE_NATIVE "Build with -mtune=native/-march=native" "ON")
+if (MTUNE_NATIVE)
+    enable_c_flag_if_avail(-mtune=native C_FLAGS_REL LWAN_HAVE_MTUNE_NATIVE)
+    enable_c_flag_if_avail(-march=native C_FLAGS_REL LWAN_HAVE_MARCH_NATIVE)
+endif ()
 
 enable_c_flag_if_avail(-fstack-protector-explicit CMAKE_C_FLAGS
-	HAVE_STACK_PROTECTOR_EXPLICIT)
+	LWAN_HAVE_STACK_PROTECTOR_EXPLICIT)
 
 #
 # Check if immediate binding and read-only global offset table flags
@@ -223,31 +266,30 @@ enable_c_flag_if_avail(-fstack-protector-explicit CMAKE_C_FLAGS
 #
 if (APPLE)
 	enable_c_flag_if_avail(-Wl,-bind_at_load CMAKE_EXE_LINKER_FLAGS
-		HAVE_IMMEDIATE_BINDING)
+		LWAN_HAVE_IMMEDIATE_BINDING)
 else ()
 	enable_c_flag_if_avail(-Wl,-z,now CMAKE_EXE_LINKER_FLAGS
-		HAVE_IMMEDIATE_BINDING)
+		LWAN_HAVE_IMMEDIATE_BINDING)
 	enable_c_flag_if_avail(-Wl,-z,relro CMAKE_EXE_LINKER_FLAGS
-		HAVE_READ_ONLY_GOT)
+		LWAN_HAVE_READ_ONLY_GOT)
 	enable_c_flag_if_avail(-fno-plt CMAKE_C_FLAGS
-		HAVE_NO_PLT)
+		LWAN_HAVE_NO_PLT)
+	enable_c_flag_if_avail(-no-pie CMAKE_C_FLAGS
+		LWAN_HAVE_NO_PIE)
 	enable_c_flag_if_avail(-Wl,-z,noexecstack CMAKE_EXE_LINKER_FLAGS
-		HAVE_NOEXEC_STACK)
+		LWAN_HAVE_NOEXEC_STACK)
 endif ()
 
 if (${CMAKE_BUILD_TYPE} MATCHES "Rel")
-	enable_c_flag_if_avail(-falign-functions=32 C_FLAGS_REL HAVE_ALIGN_FNS)
-	enable_c_flag_if_avail(-fno-semantic-interposition C_FLAGS_REL HAVE_NO_SEMANTIC_INTERPOSITION)
-	enable_c_flag_if_avail(-malign-data=abi C_FLAGS_REL HAVE_ALIGN_DATA)
-	enable_c_flag_if_avail(-fno-asynchronous-unwind-tables C_FLAGS_REL HAVE_NO_ASYNC_UNWIND_TABLES)
+	enable_c_flag_if_avail(-falign-functions=32 C_FLAGS_REL LWAN_HAVE_ALIGN_FNS)
+	enable_c_flag_if_avail(-fno-semantic-interposition C_FLAGS_REL LWAN_HAVE_NO_SEMANTIC_INTERPOSITION)
+	enable_c_flag_if_avail(-malign-data=abi C_FLAGS_REL LWAN_HAVE_ALIGN_DATA)
+	enable_c_flag_if_avail(-fno-asynchronous-unwind-tables C_FLAGS_REL LWAN_HAVE_NO_ASYNC_UNWIND_TABLES)
 
-	enable_c_flag_if_avail(-flto=jobserver C_FLAGS_REL HAVE_LTO_JOBSERVER)
-	if (NOT HAVE_LTO_JOBSERVER)
-		enable_c_flag_if_avail(-flto C_FLAGS_REL HAVE_LTO)
-	endif ()
+	enable_c_flag_if_avail(-fPIC -flto C_FLAGS_REL LWAN_HAVE_LTO)
 
-	enable_c_flag_if_avail(-ffat-lto-objects C_FLAGS_REL HAVE_LTO_FAT_OBJS)
-	enable_c_flag_if_avail(-mcrc32 C_FLAGS_REL HAVE_BUILTIN_IA32_CRC32)
+	enable_c_flag_if_avail(-ffat-lto-objects C_FLAGS_REL LWAN_HAVE_LTO_FAT_OBJS)
+	enable_c_flag_if_avail(-mcrc32 C_FLAGS_REL LWAN_HAVE_BUILTIN_IA32_CRC32)
 endif ()
 
 if (${CMAKE_BUILD_TYPE} MATCHES "Deb")
@@ -267,20 +309,23 @@ endif ()
 #
 # These warnings are only supported by GCC, and some only in newer versions.
 #
-enable_warning_if_supported(-Wduplicated-cond)
-enable_warning_if_supported(-Wduplicated-branches)
-enable_warning_if_supported(-Wlogical-op)
-enable_warning_if_supported(-Wrestrict)
+enable_warning_if_supported(-Warray-bounds)
 enable_warning_if_supported(-Wdouble-promotion)
+enable_warning_if_supported(-Wduplicated-branches)
+enable_warning_if_supported(-Wduplicated-cond)
+enable_warning_if_supported(-Wlogical-op)
 enable_warning_if_supported(-Wno-unused-parameter)
+enable_warning_if_supported(-Wrestrict)
+enable_warning_if_supported(-Wstringop-overflow)
+enable_warning_if_supported(-Wstringop-overread)
 enable_warning_if_supported(-Wstringop-truncation)
-enable_warning_if_supported(-Wvla)
 enable_warning_if_supported(-Wunsequenced)
+enable_warning_if_supported(-Wvla)
 
 # While a useful warning, this is giving false positives.
 enable_warning_if_supported(-Wno-free-nonheap-object)
 
-set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -Wall -Wextra -Wshadow -Wconversion -std=gnu99")
+set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -Wall -Wextra -Wshadow -Wconversion -std=gnu11")
 set(CMAKE_C_FLAGS_RELEASE "${CMAKE_C_FLAGS_RELEASE} ${C_FLAGS_REL}")
 set(CMAKE_C_FLAGS_RELWITHDEBINFO "${CMAKE_C_FLAGS_RELWITHDEBINFO} ${C_FLAGS_REL}")
 set(CMAKE_C_FLAGS_MINSIZEREL "${CMAKE_C_FLAGS_MINSIZEREL} ${C_FLAGS_REL}")
@@ -291,6 +336,10 @@ if (APPLE)
 	set(LWAN_COMMON_LIBS -Wl,-force_load lwan-static)
 else ()
 	set(LWAN_COMMON_LIBS -Wl,-whole-archive lwan-static -Wl,-no-whole-archive)
+endif ()
+
+if (NOT CMAKE_SYSTEM_PROCESSOR MATCHES "^x86_64|amd64")
+	set(LWAN_HAVE_LIBUCONTEXT 1)
 endif ()
 
 include_directories(src/lib)

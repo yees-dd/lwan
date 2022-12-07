@@ -431,7 +431,7 @@ class TestFileServing(LwanTest):
 
     self.assertResponsePlain(r, 301)
     self.assertTrue('location' in r.headers)
-    self.assertEqual(r.headers['location'], 'icons/')
+    self.assertEqual(r.headers['location'], '/icons/')
 
 class TestRedirect(LwanTest):
   def test_redirect_default(self):
@@ -449,6 +449,33 @@ class TestRedirect(LwanTest):
     self.assertEqual(r.headers['location'], 'http://lwan.ws')
 
 class TestRewrite(LwanTest):
+  def test_conditional_rewrite_with_cookie(self):
+    for key in ('style', 'something-else', ''):
+      for value in ('dark', 'dork', '', None):
+        r = requests.get('http://localhost:8080/css/test.css', cookies={key: value})
+
+        self.assertResponsePlain(r, 200)
+
+        if (key, value) == ('style', 'dark'):
+          self.assertEqual(r.text, 'Hello, dark!')
+        else:
+          self.assertEqual(r.text, 'Hello, light!')
+
+  def test_conditional_rewrite_without_cookie(self):
+      r = requests.get('http://localhost:8080/css/test.css')
+
+      self.assertResponsePlain(r, 200)
+      self.assertEqual(r.text, 'Hello, light!')
+
+  def test_conditional_rewrite_backref(self):
+      r = requests.get('http://localhost:8080/pattern/42/backref')
+
+      self.assertResponsePlain(r, 200)
+      self.assertEqual(r.text, 'Hello, fourtytwo!')
+
+      r = requests.get('http://localhost:8080/pattern/420/backref')
+      self.assertNotEqual(r.text, 'Hello, fourtytwo!')
+
   def test_pattern_redirect_to(self):
     r = requests.get('http://127.0.0.1:8080/pattern/foo/1234x5678', allow_redirects=False)
 
@@ -682,6 +709,17 @@ class TestAuthentication(LwanTest):
 
 
 class TestHelloWorld(LwanTest):
+  def test_request_id(self):
+    all_request_ids = set()
+    for i in range(20):
+      r = requests.get('http://127.0.0.1:8080/hello?dump_request_id=1&dump_vars=1')
+      self.assertResponsePlain(r)
+      request_id = r.headers['x-request-id']
+      self.assertFalse(request_id in all_request_ids)
+      self.assertTrue(re.match(r'^[a-f0-9]{16}$', request_id))
+      self.assertTrue('Request ID: <<%s>>' % request_id in r.text)
+      all_request_ids.add(request_id)
+
   def test_cookies(self):
     c = {
         'SOMECOOKIE': '1c330301-89e4-408a-bf6c-ce107efe8a27',
@@ -972,17 +1010,21 @@ class TestFuzzRegressionBase(SocketTest):
 
   @staticmethod
   def wrap(name):
-    with open(os.path.join("fuzz", name), "rb") as f:
+    with open(os.path.join("fuzz", "regression", name), "rb") as f:
       contents = str(f.read(), "latin-1")
     def run_test_wrapped(self):
       return self.run_test(contents)
     return run_test_wrapped
 
+def only_request_fuzzer_regression():
+  for path in os.listdir("fuzz/regression"):
+    if not "request_fuzzer" in path:
+      continue
+    if path.startswith(("clusterfuzz-", "crash-")):
+      yield path
+
 TestFuzzRegression = type('TestFuzzRegression', (TestFuzzRegressionBase,), {
-  "test_" + name.replace("-", "_"): TestFuzzRegressionBase.wrap(name)
-  for name in (
-    cf for cf in os.listdir("fuzz") if cf.startswith(("clusterfuzz-", "crash-"))
-  )
+  "test_" + name.replace("-", "_"): TestFuzzRegressionBase.wrap(name) for name in only_request_fuzzer_regression()
 })
 
 if __name__ == '__main__':

@@ -1,6 +1,6 @@
 /*
- * lwan - simple web server
- * Copyright (c) 2013 Leandro A. F. Pereira <leandro@hardinfo.org>
+ * lwan - web server
+ * Copyright (c) 2013 L. A. F. Pereira <l@tia.mat.br>
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -59,6 +59,13 @@ struct cache {
         void *context;
     } cb;
 
+    /* FIXME: I'm not really a fan of how these are set in cache_create(),
+     *        but this has to do for now. */
+    struct {
+        void *(*copy)(const void *);
+        void (*free)(void *);
+    } key;
+
     struct {
         time_t time_to_live;
     } settings;
@@ -76,10 +83,30 @@ struct cache {
 
 static bool cache_pruner_job(void *data);
 
-struct cache *cache_create(cache_create_entry_cb create_entry_cb,
-                             cache_destroy_entry_cb destroy_entry_cb,
-                             void *cb_context,
-                             time_t time_to_live)
+static ALWAYS_INLINE void *identity_key_copy(const void *key)
+{
+    return (void *)key;
+}
+
+static void identity_key_free(void *key)
+{
+}
+
+static ALWAYS_INLINE void *str_key_copy(const void *key)
+{
+    return strdup(key);
+}
+
+static ALWAYS_INLINE void str_key_free(void *key)
+{
+    free(key);
+}
+
+struct cache *cache_create_full(cache_create_entry_cb create_entry_cb,
+                                cache_destroy_entry_cb destroy_entry_cb,
+                                hash_create_func_cb hash_create_func,
+                                void *cb_context,
+                                time_t time_to_live)
 {
     struct cache *cache;
 
@@ -91,7 +118,11 @@ struct cache *cache_create(cache_create_entry_cb create_entry_cb,
     if (!cache)
         return NULL;
 
-    cache->hash.table = hash_str_new(free, NULL);
+    if (hash_create_func == hash_str_new) {
+        cache->hash.table = hash_create_func(free, NULL);
+    } else {
+        cache->hash.table = hash_create_func(NULL, NULL);
+    }
     if (!cache->hash.table)
         goto error_no_hash;
 
@@ -103,6 +134,14 @@ struct cache *cache_create(cache_create_entry_cb create_entry_cb,
     cache->cb.create_entry = create_entry_cb;
     cache->cb.destroy_entry = destroy_entry_cb;
     cache->cb.context = cb_context;
+
+    if (hash_create_func == hash_str_new) {
+        cache->key.copy = str_key_copy;
+        cache->key.free = str_key_free;
+    } else {
+        cache->key.copy = identity_key_copy;
+        cache->key.free = identity_key_free;
+    }
 
     cache->settings.time_to_live = time_to_live;
 
@@ -120,6 +159,15 @@ error_no_hash:
     free(cache);
 
     return NULL;
+}
+
+struct cache *cache_create(cache_create_entry_cb create_entry_cb,
+                           cache_destroy_entry_cb destroy_entry_cb,
+                           void *cb_context,
+                           time_t time_to_live)
+{
+    return cache_create_full(create_entry_cb, destroy_entry_cb, hash_str_new,
+                             cb_context, time_to_live);
 }
 
 void cache_destroy(struct cache *cache)
@@ -142,7 +190,7 @@ void cache_destroy(struct cache *cache)
 }
 
 struct cache_entry *cache_get_and_ref_entry(struct cache *cache,
-                                              const char *key, int *error)
+                                            const void *key, int *error)
 {
     struct cache_entry *entry;
     char *key_copy;
@@ -177,16 +225,18 @@ struct cache_entry *cache_get_and_ref_entry(struct cache *cache,
     ATOMIC_INC(cache->stats.misses);
 #endif
 
-    key_copy = strdup(key);
+    key_copy = cache->key.copy(key);
     if (UNLIKELY(!key_copy)) {
-        *error = ENOMEM;
-        return NULL;
+        if (cache->key.copy != identity_key_copy) {
+            *error = ENOMEM;
+            return NULL;
+        }
     }
 
     entry = cache->cb.create_entry(key, cache->cb.context);
     if (UNLIKELY(!entry)) {
         *error = ECANCELED;
-        free(key_copy);
+        cache->key.free(key_copy);
         return NULL;
     }
 
@@ -250,7 +300,7 @@ void cache_entry_unref(struct cache *cache, struct cache_entry *entry)
         /* FREE_KEY_ON_DESTROY is set on elements that never got into the
          * hash table, so their keys are never destroyed automatically. */
         if (entry->flags & FREE_KEY_ON_DESTROY)
-            free(entry->key);
+            cache->key.free(entry->key);
 
         return cache->cb.destroy_entry(entry, cache->cb.context);
     }
@@ -366,7 +416,7 @@ static void cache_entry_unref_defer(void *data1, void *data2)
 
 struct cache_entry *cache_coro_get_and_ref_entry(struct cache *cache,
                                                  struct coro *coro,
-                                                 const char *key)
+                                                 const void *key)
 {
     for (int tries = GET_AND_REF_TRIES; tries; tries--) {
         int error;

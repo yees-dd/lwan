@@ -1,6 +1,6 @@
 /*
- * lwan - simple web server
- * Copyright (c) 2012 Leandro A. F. Pereira <leandro@hardinfo.org>
+ * lwan - web server
+ * Copyright (c) 2012 L. A. F. Pereira <l@tia.mat.br>
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -21,7 +21,7 @@
 #include <stdlib.h>
 #include <unistd.h>
 
-#include "lwan.h"
+#include "lwan-private.h"
 
 LWAN_HANDLER(quit_lwan)
 {
@@ -165,6 +165,8 @@ LWAN_HANDLER(hello_world)
     response->headers = headers;
     response->mime_type = "text/plain";
 
+    request->flags |= RESPONSE_INCLUDE_REQUEST_ID;
+
     const char *name = lwan_request_get_query_param(request, "name");
     if (name)
         lwan_strbuf_printf(response->buffer, "Hello, %s!", name);
@@ -191,15 +193,20 @@ LWAN_HANDLER(hello_world)
                     "Key = \"%s\"; Value = \"%s\"\n", iter->key, iter->value);
     }
 
-    if (lwan_request_get_method(request) != REQUEST_METHOD_POST)
-        goto end;
+    if (lwan_request_get_method(request) == REQUEST_METHOD_POST) {
+        lwan_strbuf_append_strz(response->buffer, "\n\nPOST data\n");
+        lwan_strbuf_append_strz(response->buffer, "---------\n\n");
 
-    lwan_strbuf_append_strz(response->buffer, "\n\nPOST data\n");
-    lwan_strbuf_append_strz(response->buffer, "---------\n\n");
+        LWAN_ARRAY_FOREACH(lwan_request_get_post_params(request), iter) {
+            lwan_strbuf_append_printf(response->buffer,
+                        "Key = \"%s\"; Value = \"%s\"\n", iter->key, iter->value);
+        }
+    }
 
-    LWAN_ARRAY_FOREACH(lwan_request_get_post_params(request), iter) {
-        lwan_strbuf_append_printf(response->buffer,
-                    "Key = \"%s\"; Value = \"%s\"\n", iter->key, iter->value);
+    const char *dump_request_id = lwan_request_get_query_param(request, "dump_request_id");
+    if (dump_request_id && streq(dump_request_id, "1")) {
+        lwan_strbuf_append_printf(response->buffer, "\nRequest ID: <<%016lx>>",
+                                  lwan_request_get_id(request));
     }
 
 end:

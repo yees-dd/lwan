@@ -1,6 +1,6 @@
 /*
- * lwan - simple web server
- * Copyright (c) 2019 Leandro A. F. Pereira <leandro@hardinfo.org>
+ * lwan - web server
+ * Copyright (c) 2019 L. A. F. Pereira <l@tia.mat.br>
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -26,7 +26,7 @@
 static inline int timeout_queue_node_to_idx(struct timeout_queue *tq,
                                             struct lwan_connection *conn)
 {
-    return (conn == &tq->head) ? -1 : (int)(ptrdiff_t)(conn - tq->conns);
+    return (conn == &tq->head) ? -1 : (int)(intptr_t)(conn - tq->conns);
 }
 
 static inline struct lwan_connection *
@@ -52,14 +52,15 @@ static inline void timeout_queue_remove(struct timeout_queue *tq,
 
     next->prev = node->prev;
     prev->next = node->next;
-
-    node->next = node->prev = -1;
 }
 
-bool timeout_queue_empty(struct timeout_queue *tq) { return tq->head.next < 0; }
+inline bool timeout_queue_empty(struct timeout_queue *tq)
+{
+    return tq->head.next < 0;
+}
 
-void timeout_queue_move_to_last(struct timeout_queue *tq,
-                                struct lwan_connection *conn)
+inline void timeout_queue_move_to_last(struct timeout_queue *tq,
+                                       struct lwan_connection *conn)
 {
     /* CONN_IS_KEEP_ALIVE isn't checked here because non-keep-alive connections
      * are closed in the request processing coroutine after they have been
@@ -91,9 +92,9 @@ void timeout_queue_expire(struct timeout_queue *tq,
     if (LIKELY(conn->coro)) {
         coro_free(conn->coro);
         conn->coro = NULL;
-
-        close(lwan_connection_get_fd(tq->lwan, conn));
     }
+
+    close(lwan_connection_get_fd(tq->lwan, conn));
 }
 
 void timeout_queue_expire_waiting(struct timeout_queue *tq)

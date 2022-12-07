@@ -1,7 +1,7 @@
 /*
  * Based on libkmod-hash.c from libkmod - interface to kernel module operations
  * Copyright (C) 2011-2012  ProFUSION embedded systems
- * Copyright (C) 2013 Leandro Pereira <leandro@hardinfo.org>
+ * Copyright (C) 2013 L.Pereira <l@tia.mat.br>
  *
  * This library is free software; you can redistribute it and/or
  * modify it under the terms of the GNU Lesser General Public
@@ -36,15 +36,10 @@
 #include "hash.h"
 #include "murmur3.h"
 
-struct hash_entry {
-    const char *key;
-    const void *value;
-
-    unsigned int hashval;
-};
-
 struct hash_bucket {
-    struct hash_entry *entries;
+    void **keys;
+    void **values;
+    unsigned int *hashvals;
 
     unsigned int used;
     unsigned int total;
@@ -55,11 +50,21 @@ struct hash {
     unsigned int n_buckets_mask;
 
     unsigned (*hash_value)(const void *key);
-    int (*key_compare)(const void *k1, const void *k2);
+    int (*key_equal)(const void *k1, const void *k2);
     void (*free_value)(void *value);
     void (*free_key)(void *value);
 
     struct hash_bucket *buckets;
+};
+
+struct hash_entry {
+    void **key;
+    void **value;
+    unsigned int *hashval;
+
+    /* Only set when adding a new entry if it was already in the
+     * hash table -- always 0/false otherwise. */
+    bool existing;
 };
 
 #define MIN_BUCKETS 64
@@ -75,36 +80,37 @@ static_assert((MIN_BUCKETS & (MIN_BUCKETS - 1)) == 0,
               "Bucket size is power of 2");
 
 static inline unsigned int hash_int_shift_mult(const void *keyptr);
+static inline unsigned int hash_int64_shift_mult(const void *keyptr);
 
 static unsigned int odd_constant = DEFAULT_ODD_CONSTANT;
 static unsigned (*hash_str)(const void *key) = murmur3_simple;
 static unsigned (*hash_int)(const void *key) = hash_int_shift_mult;
+static unsigned (*hash_int64)(const void *key) = hash_int64_shift_mult;
 
-static unsigned int get_random_unsigned(void)
+static bool resize_bucket(struct hash_bucket *bucket, unsigned int new_size)
 {
-    unsigned int value = 0;
+    void **new_keys;
+    void **new_values;
+    unsigned int *new_hashvals;
 
-#if defined(SYS_getrandom)
-    long int ret = syscall(SYS_getrandom, &value, sizeof(value), 0);
-    if (ret == sizeof(value))
-        return value;
-#elif defined(HAVE_GETENTROPY)
-    int ret = getentropy(&value, sizeof(value));
-    if (ret == 0)
-        return value;
-#endif
+    new_keys = reallocarray(bucket->keys, new_size, STEPS * sizeof(void *));
+    new_values = reallocarray(bucket->values, new_size, STEPS * sizeof(void *));
+    new_hashvals =
+        reallocarray(bucket->hashvals, new_size, STEPS * sizeof(unsigned int));
 
-    int fd = open("/dev/urandom", O_CLOEXEC | O_RDONLY);
-    if (fd < 0) {
-        fd = open("/dev/random", O_CLOEXEC | O_RDONLY);
-        if (fd < 0)
-            return DEFAULT_ODD_CONSTANT;
+    if (new_keys)
+        bucket->keys = new_keys;
+    if (new_values)
+        bucket->values = new_values;
+    if (new_hashvals)
+        bucket->hashvals = new_hashvals;
+
+    if (new_keys && new_values && new_hashvals) {
+        bucket->total = new_size * STEPS;
+        return true;
     }
-    if (read(fd, &value, sizeof(value)) != sizeof(value))
-        value = DEFAULT_ODD_CONSTANT;
-    close(fd);
 
-    return value;
+    return false;
 }
 
 static inline unsigned int hash_int_shift_mult(const void *keyptr)
@@ -121,7 +127,17 @@ static inline unsigned int hash_int_shift_mult(const void *keyptr)
     return key;
 }
 
-#if defined(HAVE_BUILTIN_CPU_INIT) && defined(HAVE_BUILTIN_IA32_CRC32)
+static inline unsigned int hash_int64_shift_mult(const void *keyptr)
+{
+    const uint64_t key = (uint64_t)(uintptr_t)keyptr;
+    uint32_t key_low = (uint32_t)(key & 0xffffffff);
+    uint32_t key_high = (uint32_t)(key >> 32);
+
+    return hash_int_shift_mult((void *)(uintptr_t)key_low) ^
+           hash_int_shift_mult((void *)(uintptr_t)key_high);
+}
+
+#if defined(LWAN_HAVE_BUILTIN_CPU_INIT) && defined(LWAN_HAVE_BUILTIN_IA32_CRC32)
 static inline unsigned int hash_str_crc32(const void *keyptr)
 {
     unsigned int hash = odd_constant;
@@ -163,37 +179,55 @@ static inline unsigned int hash_int_crc32(const void *keyptr)
     return __builtin_ia32_crc32si(odd_constant,
                                   (unsigned int)(uintptr_t)keyptr);
 }
+
+static inline unsigned int hash_int64_crc32(const void *keyptr)
+{
+#ifdef __x86_64__
+    return (unsigned int)__builtin_ia32_crc32di(odd_constant,
+                                                (uint64_t)(uintptr_t)keyptr);
+#else
+    const uint64_t key = (uint64_t)(uintptr_t)keyptr;
+    uint32_t crc;
+
+    crc = __builtin_ia32_crc32si(odd_constant, (uint32_t)(key & 0xffffffff));
+    crc = __builtin_ia32_crc32si(crc, (uint32_t)(key >> 32));
+
+    return crc;
+#endif
+}
+
 #endif
 
 __attribute__((constructor(65535))) static void initialize_odd_constant(void)
 {
     /* This constant is randomized in order to mitigate the DDoS attack
      * described by Crosby and Wallach in UsenixSec2003.  */
-    odd_constant = get_random_unsigned() | 1;
+    if (lwan_getentropy(&odd_constant, sizeof(odd_constant), 0) < 0)
+        odd_constant = DEFAULT_ODD_CONSTANT;
+    odd_constant |= 1;
     murmur3_set_seed(odd_constant);
 
-#if defined(HAVE_BUILTIN_CPU_INIT) && defined(HAVE_BUILTIN_IA32_CRC32)
+#if defined(LWAN_HAVE_BUILTIN_CPU_INIT) && defined(LWAN_HAVE_BUILTIN_IA32_CRC32)
     __builtin_cpu_init();
     if (__builtin_cpu_supports("sse4.2")) {
+        lwan_status_debug("Using CRC32 instructions to calculate hashes");
         hash_str = hash_str_crc32;
         hash_int = hash_int_crc32;
+        hash_int64 = hash_int64_crc32;
     }
 #endif
 }
 
-static inline int hash_int_key_cmp(const void *k1, const void *k2)
+static inline int hash_int_key_equal(const void *k1, const void *k2)
 {
-    intptr_t a = (intptr_t)k1;
-    intptr_t b = (intptr_t)k2;
-
-    return (a > b) - (a < b);
+    return k1 == k2;
 }
 
 static void no_op(void *arg __attribute__((unused))) {}
 
 static struct hash *
 hash_internal_new(unsigned int (*hash_value)(const void *key),
-                  int (*key_compare)(const void *k1, const void *k2),
+                  int (*key_equal)(const void *k1, const void *k2),
                   void (*free_key)(void *value),
                   void (*free_value)(void *value))
 {
@@ -209,7 +243,7 @@ hash_internal_new(unsigned int (*hash_value)(const void *key),
     }
 
     hash->hash_value = hash_value;
-    hash->key_compare = key_compare;
+    hash->key_equal = key_equal;
 
     hash->free_value = free_value;
     hash->free_key = free_key;
@@ -223,7 +257,15 @@ hash_internal_new(unsigned int (*hash_value)(const void *key),
 struct hash *hash_int_new(void (*free_key)(void *value),
                           void (*free_value)(void *value))
 {
-    return hash_internal_new(hash_int, hash_int_key_cmp,
+    return hash_internal_new(hash_int, hash_int_key_equal,
+                             free_key ? free_key : no_op,
+                             free_value ? free_value : no_op);
+}
+
+struct hash *hash_int64_new(void (*free_key)(void *value),
+                            void (*free_value)(void *value))
+{
+    return hash_internal_new(hash_int64, hash_int_key_equal,
                              free_key ? free_key : no_op,
                              free_value ? free_value : no_op);
 }
@@ -232,7 +274,7 @@ struct hash *hash_str_new(void (*free_key)(void *value),
                           void (*free_value)(void *value))
 {
     return hash_internal_new(
-        hash_str, (int (*)(const void *, const void *))strcmp,
+        hash_str, (int (*)(const void *, const void *))streq,
         free_key ? free_key : no_op, free_value ? free_value : no_op);
 }
 
@@ -252,66 +294,68 @@ void hash_free(struct hash *hash)
     bucket = hash->buckets;
     bucket_end = hash->buckets + hash_n_buckets(hash);
     for (; bucket < bucket_end; bucket++) {
-        struct hash_entry *entry, *entry_end;
-        entry = bucket->entries;
-        entry_end = entry + bucket->used;
-        for (; entry < entry_end; entry++) {
-            hash->free_value((void *)entry->value);
-            hash->free_key((void *)entry->key);
+        for (unsigned int entry = 0; entry < bucket->used; entry++) {
+            hash->free_value(bucket->values[entry]);
+            hash->free_key(bucket->keys[entry]);
         }
-        free(bucket->entries);
+        free(bucket->keys);
+        free(bucket->values);
+        free(bucket->hashvals);
     }
     free(hash->buckets);
     free(hash);
 }
 
-static struct hash_entry *hash_add_entry_hashed(struct hash *hash, const void *key,
-                                                unsigned int hashval)
+static struct hash_entry hash_add_entry_hashed(struct hash *hash,
+                                               const void *key,
+                                               unsigned int hashval)
 {
     unsigned int pos = hashval & hash->n_buckets_mask;
     struct hash_bucket *bucket = hash->buckets + pos;
-    struct hash_entry *entry, *entry_end;
+    unsigned int entry;
+    bool existing = false;
 
     if (bucket->used + 1 >= bucket->total) {
-        unsigned int new_total;
-        struct hash_entry *tmp;
+        unsigned int new_bucket_total;
 
-        if (__builtin_add_overflow(bucket->total, STEPS, &new_total)) {
-            errno = EOVERFLOW;
-            return NULL;
-        }
+        if (__builtin_add_overflow(bucket->total, 1, &new_bucket_total))
+            return (struct hash_entry) {};
 
-        tmp = reallocarray(bucket->entries, new_total, sizeof(*tmp));
-        if (tmp == NULL)
-            return NULL;
-
-        bucket->entries = tmp;
-        bucket->total = new_total;
+        if (!resize_bucket(bucket, new_bucket_total))
+            return (struct hash_entry) {};
     }
 
-    entry = bucket->entries;
-    entry_end = entry + bucket->used;
-    for (; entry < entry_end; entry++) {
-        if (hashval != entry->hashval)
+    for (entry = 0; entry < bucket->used; entry++) {
+        if (hashval != bucket->hashvals[entry])
             continue;
-        if (!hash->key_compare(key, entry->key))
-            return entry;
+        if (hash->key_equal(key, bucket->keys[entry])) {
+            existing = true;
+            goto done;
+        }
     }
+
+    entry = bucket->used;
+
+    bucket->keys[entry] = NULL;
+    bucket->values[entry] = NULL;
+    bucket->hashvals[entry] = hashval;
 
     bucket->used++;
     hash->count++;
 
-    entry->hashval = hashval;
-    entry->key = entry->value = NULL;
-
-    return entry;
+done:
+    return (struct hash_entry){
+        .key = &bucket->keys[entry],
+        .value = &bucket->values[entry],
+        .hashval = &bucket->hashvals[entry],
+        .existing = existing,
+    };
 }
 
 static void rehash(struct hash *hash, unsigned int new_bucket_size)
 {
     struct hash_bucket *buckets = calloc(new_bucket_size, sizeof(*buckets));
-    const struct hash_bucket *bucket_end = hash->buckets + hash_n_buckets(hash);
-    const struct hash_bucket *bucket;
+    const unsigned int n_buckets = hash_n_buckets(hash);
     struct hash hash_copy = *hash;
 
     assert((new_bucket_size & (new_bucket_size - 1)) == 0);
@@ -324,27 +368,30 @@ static void rehash(struct hash *hash, unsigned int new_bucket_size)
     hash_copy.n_buckets_mask = new_bucket_size - 1;
     hash_copy.buckets = buckets;
 
+    struct hash_bucket *bucket;
+    struct hash_bucket *bucket_end = hash->buckets + n_buckets;
     for (bucket = hash->buckets; bucket < bucket_end; bucket++) {
-        const struct hash_entry *old = bucket->entries;
-        const struct hash_entry *old_end = old + bucket->used;
-
-        for (; old < old_end; old++) {
-            struct hash_entry *new;
-
-            new = hash_add_entry_hashed(&hash_copy, old->key, old->hashval);
-            if (UNLIKELY(!new))
+        for (unsigned int old = 0; old < bucket->used; old++) {
+            struct hash_entry new =
+                hash_add_entry_hashed(&hash_copy,
+                                      bucket->keys[old],
+                                      bucket->hashvals[old]);
+            if (UNLIKELY(!new.key))
                 goto fail;
 
-            new->key = old->key;
-            new->value = old->value;
+            *new.key = bucket->keys[old];
+            *new.value = bucket->values[old];
         }
     }
 
     /* Original table must remain untouched in the event resizing fails:
      * previous loop may return early on allocation failure, so can't free
      * bucket entry arrays there.  */
-    for (bucket = hash->buckets; bucket < bucket_end; bucket++)
-        free(bucket->entries);
+    for (bucket = hash->buckets; bucket < bucket_end; bucket++) {
+        free(bucket->keys);
+        free(bucket->values);
+        free(bucket->hashvals);
+    }
     free(hash->buckets);
 
     hash->buckets = buckets;
@@ -356,17 +403,43 @@ static void rehash(struct hash *hash, unsigned int new_bucket_size)
 
 fail:
     for (bucket_end = bucket, bucket = hash->buckets; bucket < bucket_end;
-         bucket++)
-        free(bucket->entries);
+         bucket++) {
+        free(bucket->keys);
+        free(bucket->values);
+        free(bucket->hashvals);
+    }
 
     free(buckets);
 }
 
-static struct hash_entry *hash_add_entry(struct hash *hash, const void *key)
+static struct hash_entry hash_add_entry(struct hash *hash, const void *key)
 {
     unsigned int hashval = hash->hash_value(key);
 
     return hash_add_entry_hashed(hash, key, hashval);
+}
+
+static inline bool need_rehash_grow(const struct hash *hash)
+{
+    /* The heuristic to rehash and grow the number of buckets is if there's
+     * more than 16 entries per bucket on average.  This is the number of
+     * elements in the hashvals array that would fit in a single cache line. */
+    return hash->count > hash_n_buckets(hash) * 16;
+}
+
+static inline bool need_rehash_shrink(const struct hash *hash)
+{
+    /* A hash table will be shrunk if, on average, more than 50% of its
+     * buckets are empty, but will never have less than MIN_BUCKETS buckets. */
+    const unsigned int n_buckets = hash_n_buckets(hash);
+
+    if (n_buckets <= MIN_BUCKETS)
+        return false;
+
+    if (hash->count > n_buckets / 2)
+        return false;
+
+    return true;
 }
 
 /*
@@ -377,18 +450,19 @@ static struct hash_entry *hash_add_entry(struct hash *hash, const void *key)
  */
 int hash_add(struct hash *hash, const void *key, const void *value)
 {
-    struct hash_entry *entry = hash_add_entry(hash, key);
+    struct hash_entry entry = hash_add_entry(hash, key);
 
-    if (!entry)
+    if (!entry.key)
         return -errno;
+    if (entry.existing) {
+        hash->free_key(*entry.key);
+        hash->free_value(*entry.value);
+    }
 
-    hash->free_value((void *)entry->value);
-    hash->free_key((void *)entry->key);
+    *entry.key = (void *)key;
+    *entry.value = (void *)value;
 
-    entry->key = key;
-    entry->value = value;
-
-    if (hash->count > hash->n_buckets_mask)
+    if (need_rehash_grow(hash))
         rehash(hash, hash_n_buckets(hash) * 2);
 
     return 0;
@@ -397,50 +471,49 @@ int hash_add(struct hash *hash, const void *key, const void *value)
 /* similar to hash_add(), but fails if key already exists */
 int hash_add_unique(struct hash *hash, const void *key, const void *value)
 {
-    struct hash_entry *entry = hash_add_entry(hash, key);
+    struct hash_entry entry = hash_add_entry(hash, key);
 
-    if (!entry)
+    if (!entry.key)
         return -errno;
-
-    if (entry->key || entry->value)
+    if (entry.existing)
         return -EEXIST;
 
-    entry->key = key;
-    entry->value = value;
+    *entry.key = (void *)key;
+    *entry.value = (void *)value;
 
-    if (hash->count > hash->n_buckets_mask)
+    if (need_rehash_grow(hash))
         rehash(hash, hash_n_buckets(hash) * 2);
 
     return 0;
 }
 
-static inline struct hash_entry *
+static inline struct hash_entry
 hash_find_entry(const struct hash *hash, const char *key, unsigned int hashval)
 {
     unsigned int pos = hashval & hash->n_buckets_mask;
     const struct hash_bucket *bucket = hash->buckets + pos;
-    struct hash_entry *entry, *entry_end;
 
-    entry = bucket->entries;
-    entry_end = entry + bucket->used;
-    for (; entry < entry_end; entry++) {
-        if (hashval != entry->hashval)
+    for (unsigned int entry = 0; entry < bucket->used; entry++) {
+        if (hashval != bucket->hashvals[entry])
             continue;
-        if (hash->key_compare(key, entry->key) == 0)
-            return entry;
+        if (hash->key_equal(key, bucket->keys[entry])) {
+            return (struct hash_entry){
+                .key = &bucket->keys[entry],
+                .value = &bucket->values[entry],
+                .hashval = &bucket->hashvals[entry],
+            };
+        }
     }
 
-    return NULL;
+    return (struct hash_entry){};
 }
 
 void *hash_find(const struct hash *hash, const void *key)
 {
-    const struct hash_entry *entry;
+    struct hash_entry entry =
+        hash_find_entry(hash, key, hash->hash_value(key));
 
-    entry = hash_find_entry(hash, key, hash->hash_value(key));
-    if (entry)
-        return (void *)entry->value;
-    return NULL;
+    return entry.key ? *entry.value : NULL;
 }
 
 int hash_del(struct hash *hash, const void *key)
@@ -448,14 +521,13 @@ int hash_del(struct hash *hash, const void *key)
     unsigned int hashval = hash->hash_value(key);
     unsigned int pos = hashval & hash->n_buckets_mask;
     struct hash_bucket *bucket = hash->buckets + pos;
-    struct hash_entry *entry;
 
-    entry = hash_find_entry(hash, key, hashval);
-    if (entry == NULL)
+    struct hash_entry entry = hash_find_entry(hash, key, hashval);
+    if (entry.key == NULL)
         return -ENOENT;
 
-    hash->free_value((void *)entry->value);
-    hash->free_key((void *)entry->key);
+    hash->free_value(*entry.value);
+    hash->free_key(*entry.key);
 
     if (bucket->used > 1) {
         /* Instead of compacting the bucket array by moving elements, just copy
@@ -463,28 +535,32 @@ int hash_del(struct hash *hash, const void *key)
          * changes the ordering inside the bucket array, but it's much more
          * efficient, as it always has to copy exactly at most 1 element instead
          * of potentially bucket->used elements. */
-        struct hash_entry *entry_last = bucket->entries + bucket->used - 1;
+        void *last_key = &bucket->keys[bucket->used - 1];
 
-        if (entry != entry_last)
-            memcpy(entry, entry_last, sizeof(*entry));
+        /* FIXME: Is comparing these pointers UB after calling free_key()? */
+        if (entry.key != last_key) {
+            *entry.key = last_key;
+            *entry.value = bucket->values[bucket->used - 1];
+            *entry.hashval = bucket->hashvals[bucket->used - 1];
+        }
     }
 
     bucket->used--;
     hash->count--;
 
-    if (hash->n_buckets_mask > (MIN_BUCKETS - 1) && hash->count < hash->n_buckets_mask / 2) {
+    if (need_rehash_shrink(hash)) {
         rehash(hash, hash_n_buckets(hash) / 2);
     } else {
         unsigned int steps_used = bucket->used / STEPS;
         unsigned int steps_total = bucket->total / STEPS;
 
         if (steps_used + 1 < steps_total) {
-            struct hash_entry *tmp = reallocarray(
-                bucket->entries, steps_used + 1, STEPS * sizeof(*tmp));
-            if (tmp) {
-                bucket->entries = tmp;
-                bucket->total = (steps_used + 1) * STEPS;
-            }
+            unsigned int new_total;
+
+            if (__builtin_add_overflow(steps_used, 1, &new_total))
+                return -EOVERFLOW;
+
+            resize_bucket(bucket, new_total);
         }
     }
 
@@ -505,7 +581,6 @@ bool hash_iter_next(struct hash_iter *iter,
                     const void **value)
 {
     const struct hash_bucket *b = iter->hash->buckets + iter->bucket;
-    const struct hash_entry *e;
 
     iter->entry++;
 
@@ -525,12 +600,10 @@ bool hash_iter_next(struct hash_iter *iter,
             return false;
     }
 
-    e = b->entries + iter->entry;
-
     if (value != NULL)
-        *value = e->value;
+        *value = b->values[iter->entry];
     if (key != NULL)
-        *key = e->key;
+        *key = b->keys[iter->entry];
 
     return true;
 }

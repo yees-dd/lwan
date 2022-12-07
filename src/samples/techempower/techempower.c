@@ -1,6 +1,6 @@
 /*
- * lwan - simple web server
- * Copyright (c) 2014 Leandro A. F. Pereira <leandro@hardinfo.org>
+ * lwan - web server
+ * Copyright (c) 2014 L. A. F. Pereira <l@tia.mat.br>
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -188,6 +188,8 @@ LWAN_HANDLER(json)
 {
     struct hello_world_json j = {.message = hello_world};
 
+    request->flags |= RESPONSE_NO_EXPIRES;
+
     return json_response_obj(response, hello_world_json_desc,
                              N_ELEMENTS(hello_world_json_desc), &j);
 }
@@ -211,7 +213,8 @@ static bool db_query_key(struct db_stmt *stmt, struct db_json *out, int key)
 
 static inline bool db_query(struct db_stmt *stmt, struct db_json *out)
 {
-    return db_query_key(stmt, out, rand() % 10000);
+    uint64_t random_num = lwan_random_uint64() % 10000ull;
+    return db_query_key(stmt, out, (int)random_num);
 }
 
 LWAN_HANDLER(db)
@@ -231,6 +234,8 @@ LWAN_HANDLER(db)
 
     if (!queried)
         return HTTP_INTERNAL_ERROR;
+
+    request->flags |= RESPONSE_NO_EXPIRES;
 
     return json_response_obj(response, db_json_desc, N_ELEMENTS(db_json_desc),
                          &db_json);
@@ -262,8 +267,9 @@ LWAN_HANDLER(queries)
      * so this is a good approximation.  */
     lwan_strbuf_grow_to(response->buffer, (size_t)(32l * queries));
 
-    ret = json_response_arr(response, &queries_array_desc, &qj);
+    request->flags |= RESPONSE_NO_EXPIRES;
 
+    ret = json_response_arr(response, &queries_array_desc, &qj);
 out:
     db_stmt_finalize(stmt);
 
@@ -276,10 +282,11 @@ struct db_json_cached {
     struct db_json db_json;
 };
 
-static struct cache_entry *cached_queries_new(const char *key, void *context)
+static struct cache_entry *cached_queries_new(const void *keyptr, void *context)
 {
     struct db_json_cached *entry;
     struct db_stmt *stmt;
+    int key = (int)(uintptr_t)keyptr;
 
     entry = malloc(sizeof(*entry));
     if (UNLIKELY(!entry))
@@ -292,7 +299,7 @@ static struct cache_entry *cached_queries_new(const char *key, void *context)
         return NULL;
     }
 
-    if (!db_query_key(stmt, &entry->db_json, atoi(key))) {
+    if (!db_query_key(stmt, &entry->db_json, key)) {
         free(entry);
         entry = NULL;
     }
@@ -307,14 +314,14 @@ static void cached_queries_free(struct cache_entry *entry, void *context)
     free(entry);
 }
 
-static struct cache_entry *my_cache_coro_get_and_ref_entry(struct cache *cache,
-                                                           struct lwan_request *request,
-                                                           const char *key)
+static struct cache_entry *my_cache_coro_get_and_ref_entry(
+    struct cache *cache, struct lwan_request *request, int key)
 {
     /* Using this function instead of cache_coro_get_and_ref_entry() will avoid
-     * calling coro_defer(), which, in cases where the number of cached queries is
-     * too high, will trigger reallocations of the coro_defer array (and the "demotion"
-     * from the storage inlined in the coro struct to somewhere in the heap).
+     * calling coro_defer(), which, in cases where the number of cached queries
+     * is too high, will trigger reallocations of the coro_defer array (and the
+     * "demotion" from the storage inlined in the coro struct to somewhere in
+     * the heap).
      *
      * For large number of cached elements, too, this will reduce the number of
      * indirect calls that are performed every time a request is serviced.
@@ -322,7 +329,8 @@ static struct cache_entry *my_cache_coro_get_and_ref_entry(struct cache *cache,
 
     for (int tries = 64; tries; tries--) {
         int error;
-        struct cache_entry *ce = cache_get_and_ref_entry(cache, key, &error);
+        struct cache_entry *ce =
+            cache_get_and_ref_entry(cache, (void *)(uintptr_t)key, &error);
 
         if (LIKELY(ce))
             return ce;
@@ -350,13 +358,11 @@ LWAN_HANDLER(cached_queries)
 
     struct queries_json qj = {.queries_len = (size_t)queries};
     for (long i = 0; i < queries; i++) {
-        char key_buf[INT_TO_STR_BUFFER_SIZE];
         struct db_json_cached *jc;
-        size_t discard;
+        int key = (int)lwan_random_uint64() % 10000;
 
         jc = (struct db_json_cached *)my_cache_coro_get_and_ref_entry(
-            cached_queries_cache, request,
-            int_to_string(rand() % 10000, key_buf, &discard));
+            cached_queries_cache, request, key);
         if (UNLIKELY(!jc))
             return HTTP_INTERNAL_ERROR;
 
@@ -370,6 +376,7 @@ LWAN_HANDLER(cached_queries)
      * so this is a good approximation.  */
     lwan_strbuf_grow_to(response->buffer, (size_t)(32l * queries));
 
+    request->flags |= RESPONSE_NO_EXPIRES;
     return json_response_arr(response, &queries_array_desc, &qj);
 }
 
@@ -378,6 +385,7 @@ LWAN_HANDLER(plaintext)
     lwan_strbuf_set_static(response->buffer, hello_world,
                            sizeof(hello_world) - 1);
 
+    request->flags |= RESPONSE_NO_EXPIRES;
     response->mime_type = "text/plain";
     return HTTP_OK;
 }
@@ -461,6 +469,7 @@ LWAN_HANDLER(fortunes)
                                              &fortune)))
         return HTTP_INTERNAL_ERROR;
 
+    request->flags |= RESPONSE_NO_EXPIRES;
     response->mime_type = "text/html; charset=UTF-8";
     return HTTP_OK;
 }
@@ -473,12 +482,6 @@ LWAN_HANDLER(quit_lwan)
 
 int main(void)
 {
-    struct lwan l;
-
-    lwan_init(&l);
-
-    srand((unsigned int)time(NULL));
-
     if (getenv("USE_MYSQL")) {
         db_connection_params = (struct db_connection_params){
             .type = DB_CONN_MYSQL,
@@ -512,18 +515,18 @@ int main(void)
     if (!fortune_tpl)
         lwan_status_critical("Could not compile fortune templates");
 
-    cached_queries_cache = cache_create(cached_queries_new,
-                                        cached_queries_free,
-                                        NULL,
-                                        3600 /* 1 hour */);
+    cached_queries_cache = cache_create_full(cached_queries_new,
+                                             cached_queries_free,
+                                             hash_int_new,
+                                             NULL,
+                                             3600 /* 1 hour */);
     if (!cached_queries_cache)
         lwan_status_critical("Could not create cached queries cache");
 
-    lwan_main_loop(&l);
+    lwan_main();
 
     cache_destroy(cached_queries_cache);
     lwan_tpl_free(fortune_tpl);
-    lwan_shutdown(&l);
 
     return 0;
 }

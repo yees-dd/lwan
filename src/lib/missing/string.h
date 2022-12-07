@@ -1,6 +1,6 @@
 /*
- * lwan - simple web server
- * Copyright (c) 2012 Leandro A. F. Pereira <leandro@hardinfo.org>
+ * lwan - web server
+ * Copyright (c) 2012 L. A. F. Pereira <l@tia.mat.br>
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -23,11 +23,13 @@
 #ifndef MISSING_STRING_H
 #define MISSING_STRING_H
 
+#include <stdbool.h>
+
 #define strndupa_impl(s, l)                                                    \
     ({                                                                         \
         char *strndupa_tmp_s = alloca(l + 1);                                  \
         strndupa_tmp_s[l] = '\0';                                              \
-        memcpy(strndupa_tmp_s, s, l);                                          \
+        strncpy(strndupa_tmp_s, s, l);                                          \
     })
 
 #ifndef strndupa
@@ -44,18 +46,18 @@
 
 #ifdef NEED_ALLOCA_H
 #undef NEED_ALLOCA_H
-#ifdef HAVE_ALLOCA_H
+#ifdef LWAN_HAVE_ALLOCA_H
 #include <alloca.h>
 #else
 #include <stdlib.h>
 #endif
 #endif
 
-#ifndef HAVE_MEMPCPY
+#ifndef LWAN_HAVE_MEMPCPY
 void *mempcpy(void *dest, const void *src, size_t len);
 #endif
 
-#ifndef HAVE_MEMRCHR
+#ifndef LWAN_HAVE_MEMRCHR
 void *memrchr(const void *s, int c, size_t n);
 #endif
 
@@ -69,5 +71,7 @@ static inline void *mempmove(void *dest, const void *src, size_t len)
     char *d = (char *)memmove(dest, src, len);
     return d + len;
 }
+
+bool strcaseequal_neutral(const char *a, const char *b);
 
 #endif /* MISSING_STRING_H */

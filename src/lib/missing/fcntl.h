@@ -1,6 +1,6 @@
 /*
- * lwan - simple web server
- * Copyright (c) 2012 Leandro A. F. Pereira <leandro@hardinfo.org>
+ * lwan - web server
+ * Copyright (c) 2012 L. A. F. Pereira <l@tia.mat.br>
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -53,7 +53,7 @@
 
 #endif /* __linux__ */
 
-#ifndef HAVE_READAHEAD
+#ifndef LWAN_HAVE_READAHEAD
 #include <sys/types.h>
 
 ssize_t readahead(int fd, off_t offset, size_t count);

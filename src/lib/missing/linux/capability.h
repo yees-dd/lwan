@@ -1,6 +1,6 @@
 /*
- * lwan - simple web server
- * Copyright (c) 2018 Leandro A. F. Pereira <leandro@hardinfo.org>
+ * lwan - web server
+ * Copyright (c) 2018 L. A. F. Pereira <l@tia.mat.br>
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -21,7 +21,7 @@
 #ifndef __MISSING_CAPABILITY_H__
 #define __MISSING_CAPABILITY_H__
 
-#if defined(__linux__) && defined(HAVE_LINUX_CAPABILITY)
+#if defined(__linux__) && defined(LWAN_HAVE_LINUX_CAPABILITY)
 
 #include_next <linux/capability.h>
 #include <stdio.h>

@@ -1,6 +1,6 @@
 /*
- * lwan - simple web server
- * Copyright (c) 2019 Leandro A. F. Pereira <leandro@hardinfo.org>
+ * lwan - web server
+ * Copyright (c) 2019 L. A. F. Pereira <l@tia.mat.br>
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -69,12 +69,6 @@ dump(struct config *config, int indent_level)
             break;
         }
     }
-
-    if (config_last_error(config)) {
-        lwan_status_critical("Error while reading configuration file (line %d): %s",
-                             config_cur_line(config),
-                             config_last_error(config));
-    }
 }
 
 int main(int argc, char *argv[])
@@ -94,6 +88,12 @@ int main(int argc, char *argv[])
     }
 
     dump(config, 0);
+
+    if (config_last_error(config)) {
+        lwan_status_critical("Error while reading configuration file (line %d): %s\n",
+                             config_cur_line(config),
+                             config_last_error(config));
+    }
 
     config_close(config);
 

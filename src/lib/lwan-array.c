@@ -1,6 +1,6 @@
 /*
- * lwan - simple web server
- * Copyright (c) 2017 Leandro A. F. Pereira <leandro@hardinfo.org>
+ * lwan - web server
+ * Copyright (c) 2017 L. A. F. Pereira <l@tia.mat.br>
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -41,7 +41,7 @@ int lwan_array_reset(struct lwan_array *a, void *inline_storage)
     return 0;
 }
 
-#if !defined(HAVE_BUILTIN_ADD_OVERFLOW)
+#if !defined(LWAN_HAVE_BUILTIN_ADD_OVERFLOW)
 static inline bool add_overflow(size_t a, size_t b, size_t *out)
 {
     if (UNLIKELY(a > 0 && b > SIZE_MAX - a))
@@ -125,11 +125,15 @@ static void coro_lwan_array_free_inline(void *data)
     free(array);
 }
 
-struct lwan_array *coro_lwan_array_new(struct coro *coro, bool inline_first)
+struct lwan_array *coro_lwan_array_new(struct coro *coro,
+                                       size_t struct_size,
+                                       bool inline_first)
 {
     struct lwan_array *array;
 
-    array = coro_malloc_full(coro, sizeof(*array),
+    assert(struct_size >= sizeof(struct lwan_array));
+
+    array = coro_malloc_full(coro, struct_size,
                              inline_first ? coro_lwan_array_free_inline
                                           : coro_lwan_array_free_heap);
     if (LIKELY(array))

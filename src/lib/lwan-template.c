@@ -1,6 +1,6 @@
 /*
- * lwan - simple web server
- * Copyright (c) 2012 Leandro A. F. Pereira <leandro@hardinfo.org>
+ * lwan - web server
+ * Copyright (c) 2012 L. A. F. Pereira <l@tia.mat.br>
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -897,7 +897,7 @@ void lwan_append_double_to_strbuf(struct lwan_strbuf *buf, void *ptr)
 
 bool lwan_tpl_double_is_empty(void *ptr)
 {
-#if defined(HAVE_BUILTIN_FPCLASSIFY)
+#if defined(LWAN_HAVE_BUILTIN_FPCLASSIFY)
     return __builtin_fpclassify(FP_NAN, FP_INFINITE, FP_NORMAL, FP_SUBNORMAL,
                                 FP_ZERO, *(double *)ptr);
 #else
@@ -1394,7 +1394,7 @@ lwan_tpl_compile_file(const char *filename,
     if (fstat(fd, &st) < 0)
         goto close_file;
 
-    mapped = mmap(NULL, (size_t)st.st_size, PROT_READ, MAP_SHARED, fd, 0);
+    mapped = mmap(NULL, (size_t)st.st_size, PROT_READ, MAP_PRIVATE, fd, 0);
     if (mapped == MAP_FAILED)
         goto close_file;
 

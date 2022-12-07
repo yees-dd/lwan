@@ -1,6 +1,6 @@
 /*
- * lwan - simple web server
- * Copyright (c) 2018 Leandro A. F. Pereira <leandro@hardinfo.org>
+ * lwan - web server
+ * Copyright (c) 2018 L. A. F. Pereira <l@tia.mat.br>
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -19,7 +19,7 @@
 
 #include "lwan.h"
 
-LWAN_HANDLER(hello_world)
+LWAN_HANDLER_ROUTE(hello_world, "/")
 {
     static const char message[] = "Hello, World!";
 
@@ -29,21 +29,4 @@ LWAN_HANDLER(hello_world)
     return HTTP_OK;
 }
 
-int
-main(void)
-{
-    const struct lwan_url_map default_map[] = {
-        { .prefix = "/", .handler = LWAN_HANDLER_REF(hello_world) },
-        { .prefix = NULL }
-    };
-    struct lwan l;
-
-    lwan_init(&l);
-
-    lwan_set_url_map(&l, default_map);
-    lwan_main_loop(&l);
-
-    lwan_shutdown(&l);
-
-    return 0;
-}
+int main(void) { return lwan_main(); }

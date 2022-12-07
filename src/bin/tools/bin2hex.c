@@ -1,6 +1,6 @@
 /*
  * bin2hex - convert binary files to hexdump
- * Copyright (c) 2017 Leandro A. F. Pereira <leandro@hardinfo.org>
+ * Copyright (c) 2017 L. A. F. Pereira <l@tia.mat.br>
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -49,9 +49,20 @@ static int bin2hex(const char *path, const char *identifier)
         return -errno;
 
     printf("static const unsigned char %s[] = {\n", identifier);
+    printf("    ");
 
-    for (i = 0; i < st.st_size; i++)
-        printf("0x%02x, ", ptr[i] & 0xff);
+    int bytes_in_this_line = 0;
+    for (i = 0; i < st.st_size; i++) {
+        printf("0x%02x,", ptr[i] & 0xff);
+
+        bytes_in_this_line++;
+        if (bytes_in_this_line == 11) {
+            printf("\n    ");
+            bytes_in_this_line = 0;
+        } else {
+            printf(" ");
+        }
+    }
 
     printf("\n};\n");
 

@@ -1,6 +1,6 @@
 /*
- * lwan - simple web server
- * Copyright (c) 2019 Leandro A. F. Pereira <leandro@hardinfo.org>
+ * lwan - web server
+ * Copyright (c) 2019 L. A. F. Pereira <l@tia.mat.br>
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -60,25 +60,24 @@ static void write_websocket_frame(struct lwan_request *request,
                                   char *msg,
                                   size_t len)
 {
-    uint8_t frame[9];
+    uint8_t frame[10] = { header_byte };
     size_t frame_len;
 
     if (len <= 125) {
-        frame[0] = (uint8_t)len;
-        frame_len = 1;
+        frame[1] = (uint8_t)len;
+        frame_len = 2;
     } else if (len <= 65535) {
-        frame[0] = 0x7e;
-        memcpy(frame + 1, &(uint16_t){htons((uint16_t)len)}, sizeof(uint16_t));
-        frame_len = 3;
+        frame[1] = 0x7e;
+        memcpy(frame + 2, &(uint16_t){htons((uint16_t)len)}, sizeof(uint16_t));
+        frame_len = 4;
     } else {
-        frame[0] = 0x7f;
-        memcpy(frame + 1, &(uint64_t){htobe64((uint64_t)len)},
+        frame[1] = 0x7f;
+        memcpy(frame + 2, &(uint64_t){htobe64((uint64_t)len)},
                sizeof(uint64_t));
-        frame_len = 9;
+        frame_len = 10;
     }
 
     struct iovec vec[] = {
-        {.iov_base = &header_byte, .iov_len = 1},
         {.iov_base = frame, .iov_len = frame_len},
         {.iov_base = msg, .iov_len = len},
     };
@@ -86,13 +85,11 @@ static void write_websocket_frame(struct lwan_request *request,
     lwan_writev(request, vec, N_ELEMENTS(vec));
 }
 
-void lwan_response_websocket_write(struct lwan_request *request)
+static inline void lwan_response_websocket_write(struct lwan_request *request, unsigned char op)
 {
     size_t len = lwan_strbuf_get_length(request->response.buffer);
     char *msg = lwan_strbuf_get_buffer(request->response.buffer);
-    /* FIXME: does it make a difference if we use WS_OPCODE_TEXT or
-     * WS_OPCODE_BINARY? */
-    unsigned char header = 0x80 | WS_OPCODE_TEXT;
+    unsigned char header = 0x80 | op;
 
     if (!(request->conn->flags & CONN_IS_WEBSOCKET))
         return;
@@ -101,20 +98,14 @@ void lwan_response_websocket_write(struct lwan_request *request)
     lwan_strbuf_reset(request->response.buffer);
 }
 
-static void send_websocket_pong(struct lwan_request *request, size_t len)
+void lwan_response_websocket_write_text(struct lwan_request *request)
 {
-    char temp[128];
+    lwan_response_websocket_write(request, WS_OPCODE_TEXT);
+}
 
-    if (UNLIKELY(len > 125)) {
-        lwan_status_debug("Received PING opcode with length %zu."
-                          "Max is 125. Aborting connection.",
-                          len);
-        coro_yield(request->conn->coro, CONN_CORO_ABORT);
-        __builtin_unreachable();
-    }
-
-    lwan_recv(request, temp, len, 0);
-    write_websocket_frame(request, WS_OPCODE_PONG, temp, len);
+void lwan_response_websocket_write_binary(struct lwan_request *request)
+{
+    lwan_response_websocket_write(request, WS_OPCODE_BINARY);
 }
 
 static size_t get_frame_length(struct lwan_request *request, uint16_t header)
@@ -155,14 +146,6 @@ static size_t get_frame_length(struct lwan_request *request, uint16_t header)
     default:
         return (size_t)(header & 0x7f);
     }
-}
-
-static void discard_frame(struct lwan_request *request, uint16_t header)
-{
-    size_t len = get_frame_length(request, header);
-
-    for (char buffer[128]; len;)
-        len -= (size_t)lwan_recv(request, buffer, sizeof(buffer), 0);
 }
 
 static void unmask(char *msg, size_t msg_len, char mask[static 4])
@@ -210,7 +193,34 @@ static void unmask(char *msg, size_t msg_len, char mask[static 4])
     }
 }
 
-int lwan_response_websocket_read(struct lwan_request *request)
+static void send_websocket_pong(struct lwan_request *request, uint16_t header)
+{
+    const size_t len = header & 0x7f;
+    char msg[128];
+    char mask[4];
+
+    assert(header & 0x80);
+
+    if (UNLIKELY(len > 125)) {
+        lwan_status_debug("Received PING opcode with length %zu."
+                          "Max is 125. Aborting connection.",
+                          len);
+        coro_yield(request->conn->coro, CONN_CORO_ABORT);
+        __builtin_unreachable();
+    }
+
+    struct iovec vec[] = {
+        {.iov_base = mask, .iov_len = sizeof(mask)},
+        {.iov_base = msg, .iov_len = len},
+    };
+
+    lwan_readv(request, vec, N_ELEMENTS(vec));
+    unmask(msg, len, mask);
+
+    write_websocket_frame(request, 0x80 | WS_OPCODE_PONG, msg, len);
+}
+
+int lwan_response_websocket_read_hint(struct lwan_request *request, size_t size_hint)
 {
     enum ws_opcode opcode = WS_OPCODE_INVALID;
     enum ws_opcode last_opcode;
@@ -220,7 +230,7 @@ int lwan_response_websocket_read(struct lwan_request *request)
     if (!(request->conn->flags & CONN_IS_WEBSOCKET))
         return ENOTCONN;
 
-    lwan_strbuf_reset(request->response.buffer);
+    lwan_strbuf_reset_trim(request->response.buffer, size_hint);
 
 next_frame:
     last_opcode = opcode;
@@ -263,14 +273,10 @@ next_frame:
         break;
 
     case WS_OPCODE_PING:
-        send_websocket_pong(request, header & 0x7f);
+        send_websocket_pong(request, header);
         goto next_frame;
 
     case WS_OPCODE_PONG:
-        lwan_status_debug("Received unsolicited PONG frame, discarding frame");
-        discard_frame(request, header);
-        goto next_frame;
-
     case WS_OPCODE_RSVD_1 ... WS_OPCODE_RSVD_5:
     case WS_OPCODE_RSVD_CONTROL_1 ... WS_OPCODE_RSVD_CONTROL_5:
     case WS_OPCODE_INVALID:
@@ -298,4 +304,15 @@ next_frame:
         goto next_frame;
 
     return (request->conn->flags & CONN_IS_WEBSOCKET) ? 0 : ECONNRESET;
+}
+
+inline int lwan_response_websocket_read(struct lwan_request *request)
+{
+    /* Ensure that a rogue client won't keep increasing the memory usage in an
+     * uncontrolled manner by curbing the backing store to 1KB at most by default.
+     * If an application expects messages to be larger than 1024 bytes on average,
+     * they can call lwan_response_websocket_read_hint() directly with a larger
+     * value to avoid malloc chatter (things should still work, but will be
+     * slightly more inefficient). */
+    return lwan_response_websocket_read_hint(request, 1024);
 }

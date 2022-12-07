@@ -1,6 +1,6 @@
 /*
- * lwan - simple web server
- * Copyright (c) 2012 Leandro A. F. Pereira <leandro@hardinfo.org>
+ * lwan - web server
+ * Copyright (c) 2012 L. A. F. Pereira <l@tia.mat.br>
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -23,10 +23,24 @@
 #define MISSING_ASSERT_H
 
 #undef static_assert
-#if defined(HAVE_STATIC_ASSERT)
+#if defined(LWAN_HAVE_STATIC_ASSERT)
 # define static_assert(expr, msg)	_Static_assert(expr, msg)
 #else
 # define static_assert(expr, msg)
+#endif
+
+/* Use assertions as optimization hints */
+#ifndef NDEBUG
+#undef assert
+#ifdef __clang__
+#define assert(expr) __builtin_assume(expr)
+#else
+#define assert(expr)                                                           \
+    do {                                                                       \
+        if (!(expr))                                                           \
+            __builtin_unreachable();                                           \
+    } while (0)
+#endif
 #endif
 
 #endif /* MISSING_ASSERT_H */

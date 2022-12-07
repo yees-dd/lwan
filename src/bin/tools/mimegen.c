@@ -1,6 +1,6 @@
 /*
- * lwan - simple web server
- * Copyright (c) 2016 Leandro A. F. Pereira <leandro@hardinfo.org>
+ * lwan - web server
+ * Copyright (c) 2016 L. A. F. Pereira <l@tia.mat.br>
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -26,11 +26,11 @@
 #include <stdlib.h>
 #include <string.h>
 
-#if defined(HAVE_BROTLI)
+#if defined(LWAN_HAVE_BROTLI)
 #include <brotli/encode.h>
-#elif defined(HAVE_ZSTD)
+#elif defined(LWAN_HAVE_ZSTD)
 #include <zstd.h>
-#elif defined(HAVE_ZOPFLI)
+#elif defined(LWAN_HAVE_ZOPFLI)
 #include <zopfli/zopfli.h>
 #else
 #include <zlib.h>
@@ -110,7 +110,7 @@ static char *compress_output(const struct output *output, size_t *outlen)
 {
     char *compressed;
 
-#if defined(HAVE_BROTLI)
+#if defined(LWAN_HAVE_BROTLI)
     *outlen = BrotliEncoderMaxCompressedSize(output->used);
 
     compressed = malloc(*outlen);
@@ -126,7 +126,7 @@ static char *compress_output(const struct output *output, size_t *outlen)
         fprintf(stderr, "Could not compress mime type table with Brotli\n");
         exit(1);
     }
-#elif defined(HAVE_ZSTD)
+#elif defined(LWAN_HAVE_ZSTD)
     *outlen = ZSTD_compressBound(output->used);
 
     compressed = malloc(*outlen);
@@ -141,7 +141,7 @@ static char *compress_output(const struct output *output, size_t *outlen)
         fprintf(stderr, "Could not compress mime type table with ZSTD\n");
         exit(1);
     }
-#elif defined(HAVE_ZOPFLI)
+#elif defined(LWAN_HAVE_ZOPFLI)
     ZopfliOptions opts;
 
     *outlen = 0;
@@ -177,7 +177,7 @@ static bool is_builtin_mime_type(const char *mime)
      * a bsearch().  application/octet-stream is the fallback. */
     if (streq(mime, "application/octet-stream"))
         return true;
-    if (streq(mime, "application/javascript"))
+    if (streq(mime, "text/javascript"))
         return true;
     if (streq(mime, "image/jpeg"))
         return true;
@@ -220,6 +220,7 @@ int main(int argc, char *argv[])
     ext_mime = hash_str_new(free, free);
     if (!ext_mime) {
         fprintf(stderr, "Could not allocate hash table\n");
+        fclose(fp);
         return 1;
     }
 
@@ -263,6 +264,7 @@ int main(int argc, char *argv[])
 
             if (!k || !v) {
                 fprintf(stderr, "Could not allocate memory\n");
+                fclose(fp);
                 return 1;
             }
 
@@ -273,6 +275,7 @@ int main(int argc, char *argv[])
 
                 if (r != -EEXIST) {
                     fprintf(stderr, "Could not add extension to hash table\n");
+                    fclose(fp);
                     return 1;
                 }
             }
@@ -283,6 +286,7 @@ int main(int argc, char *argv[])
     exts = calloc(hash_get_count(ext_mime), sizeof(char *));
     if (!exts) {
         fprintf(stderr, "Could not allocate extension array\n");
+        fclose(fp);
         return 1;
     }
     hash_iter_init(ext_mime, &iter);
@@ -294,6 +298,7 @@ int main(int argc, char *argv[])
     output.ptr = malloc(output.capacity);
     if (!output.ptr) {
         fprintf(stderr, "Could not allocate temporary memory\n");
+        fclose(fp);
         return 1;
     }
     for (i = 0; i < hash_get_count(ext_mime); i++) {
@@ -302,16 +307,18 @@ int main(int argc, char *argv[])
         strncpy(ext_lower, exts[i], 8);
 
         for (char *p = ext_lower; *p; p++)
-            *p |= 0x20;
+            *p &= ~0x20;
 
         if (output_append_padded(&output, ext_lower) < 0) {
             fprintf(stderr, "Could not append to output\n");
+            fclose(fp);
             return 1;
         }
     }
     for (i = 0; i < hash_get_count(ext_mime); i++) {
         if (output_append(&output, hash_find(ext_mime, exts[i])) < 0) {
             fprintf(stderr, "Could not append to output\n");
+            fclose(fp);
             return 1;
         }
     }
@@ -320,15 +327,16 @@ int main(int argc, char *argv[])
     compressed = compress_output(&output, &compressed_size);
     if (!compressed) {
         fprintf(stderr, "Could not compress data\n");
+        fclose(fp);
         return 1;
     }
 
     /* Print output. */
-#if defined(HAVE_BROTLI)
+#if defined(LWAN_HAVE_BROTLI)
     printf("/* Compressed with brotli */\n");
-#elif defined(HAVE_ZSTD)
+#elif defined(LWAN_HAVE_ZSTD)
     printf("/* Compressed with zstd */\n");
-#elif defined(HAVE_ZOPFLI)
+#elif defined(LWAN_HAVE_ZOPFLI)
     printf("/* Compressed with zopfli (deflate) */\n");
 #else
     printf("/* Compressed with zlib (deflate) */\n");

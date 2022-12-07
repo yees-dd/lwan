@@ -1,6 +1,6 @@
 /*
- * lwan - simple web server
- * Copyright (c) 2019 Leandro A. F. Pereira <leandro@hardinfo.org>
+ * lwan - web server
+ * Copyright (c) 2019 L. A. F. Pereira <l@tia.mat.br>
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -23,7 +23,7 @@
 #ifndef MISSING_STDIO_H
 #define MISSING_STDIO_H
 
-#if !defined(HAVE_FWRITE_UNLOCKED)
+#if !defined(LWAN_HAVE_FWRITE_UNLOCKED)
 size_t fwrite_unlocked(const void *ptr, size_t size, size_t n, FILE *stream);
 #endif
 

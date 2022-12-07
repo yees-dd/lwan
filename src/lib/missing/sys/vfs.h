@@ -1,6 +1,6 @@
 /*
- * lwan - simple web server
- * Copyright (c) 2020 Leandro A. F. Pereira <leandro@hardinfo.org>
+ * lwan - web server
+ * Copyright (c) 2020 L. A. F. Pereira <l@tia.mat.br>
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -23,12 +23,13 @@
 #include <sys/param.h>
 #elif defined(__linux__)
 #include_next <sys/vfs.h>
+#include <linux/magic.h>
 #endif
 
 #ifndef _MISSING_VFS_H_
 #define _MISSING_VFS_H_
 
-#if !defined(HAVE_STATFS)
+#if !defined(LWAN_HAVE_STATFS)
 struct statfs {
     int f_type;
 };

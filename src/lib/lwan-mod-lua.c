@@ -1,6 +1,6 @@
 /*
- * lwan - simple web server
- * Copyright (c) 2017 Leandro A. F. Pereira <leandro@hardinfo.org>
+ * lwan - web server
+ * Copyright (c) 2017 L. A. F. Pereira <l@tia.mat.br>
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -47,7 +47,7 @@ struct lwan_lua_state {
     lua_State *L;
 };
 
-static struct cache_entry *state_create(const char *key __attribute__((unused)),
+static struct cache_entry *state_create(const void *key __attribute__((unused)),
                                         void *context)
 {
     struct lwan_lua_priv *priv = context;
@@ -103,7 +103,7 @@ static ALWAYS_INLINE struct lwan_value
 get_handle_prefix(struct lwan_request *request)
 {
 #define ENTRY(s) {.value = s, .len = sizeof(s) - 1}
-#define GEN_TABLE_ENTRY(upper, lower, mask, constant)                          \
+#define GEN_TABLE_ENTRY(upper, lower, mask, constant, probability)             \
     [REQUEST_METHOD_##upper] = ENTRY("handle_" #lower "_"),
 
     static const struct lwan_value method2name[REQUEST_METHOD_MASK] = {
@@ -307,6 +307,7 @@ static const struct lwan_module module = {
     .create_from_hash = lua_create_from_hash,
     .destroy = lua_destroy,
     .handle_request = lua_handle_request,
+    .flags = HANDLER_EXPECTS_BODY_DATA,
 };
 
 LWAN_REGISTER_MODULE(lua, &module);

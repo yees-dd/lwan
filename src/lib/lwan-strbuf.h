@@ -1,6 +1,6 @@
 /*
- * lwan - simple web server
- * Copyright (c) 2012 Leandro A. F. Pereira <leandro@hardinfo.org>
+ * lwan - web server
+ * Copyright (c) 2012 L. A. F. Pereira <l@tia.mat.br>
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -20,27 +20,40 @@
 
 #pragma once
 
+#include <stdarg.h>
 #include <stdbool.h>
 #include <stdio.h>
 #include <string.h>
 
 struct lwan_strbuf {
     char *buffer;
+
+    /* `capacity` used to be derived from `used` by aligning it to the next
+     * power of two, but this resulted in re-allocations after this strbuf
+     * been reset between requests.  It now always contains the capacity
+     * allocated by `buffer`; resetting essentially only resets `used` and
+     * writes `\0` to buffer[0]. */
     size_t capacity, used;
+
     unsigned int flags;
 };
 
 #define LWAN_STRBUF_STATIC_INIT                                                \
     (struct lwan_strbuf) { .buffer = "" }
 
+bool lwan_strbuf_init_with_fixed_buffer(struct lwan_strbuf *buf,
+                                        void *buffer,
+                                        size_t size);
 bool lwan_strbuf_init_with_size(struct lwan_strbuf *buf, size_t size);
 bool lwan_strbuf_init(struct lwan_strbuf *buf);
 struct lwan_strbuf *lwan_strbuf_new_static(const char *str, size_t size);
 struct lwan_strbuf *lwan_strbuf_new_with_size(size_t size);
+struct lwan_strbuf *lwan_strbuf_new_with_fixed_buffer(size_t size);
 struct lwan_strbuf *lwan_strbuf_new(void);
 void lwan_strbuf_free(struct lwan_strbuf *s);
 
 void lwan_strbuf_reset(struct lwan_strbuf *s);
+void lwan_strbuf_reset_trim(struct lwan_strbuf *s, size_t trim_thresh);
 
 bool lwan_strbuf_append_char(struct lwan_strbuf *s, const char c);
 
@@ -66,9 +79,13 @@ static inline bool lwan_strbuf_setz(struct lwan_strbuf *s1, const char *s2)
 
 bool lwan_strbuf_append_printf(struct lwan_strbuf *s, const char *fmt, ...)
     __attribute__((format(printf, 2, 3)));
+bool lwan_strbuf_append_vprintf(struct lwan_strbuf *s,
+                                const char *fmt,
+                                va_list v);
 
 bool lwan_strbuf_printf(struct lwan_strbuf *s1, const char *fmt, ...)
     __attribute__((format(printf, 2, 3)));
+bool lwan_strbuf_vprintf(struct lwan_strbuf *s1, const char *fmt, va_list ap);
 
 bool lwan_strbuf_grow_to(struct lwan_strbuf *s, size_t new_size);
 bool lwan_strbuf_grow_by(struct lwan_strbuf *s, size_t offset);
@@ -82,3 +99,6 @@ static inline char *lwan_strbuf_get_buffer(const struct lwan_strbuf *s)
 {
     return s->buffer;
 }
+
+bool lwan_strbuf_init_from_file(struct lwan_strbuf *s, const char *path);
+struct lwan_strbuf *lwan_strbuf_new_from_file(const char *path);

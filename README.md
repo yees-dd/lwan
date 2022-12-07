@@ -16,6 +16,13 @@ Build status
 | macOS       | x86_64 | ![osx-release](https://shield.lwan.ws/img/gycKbr/release-sierra "Release macOS")       | ![osx-debug](https://shield.lwan.ws/img/gycKbr/debug-sierra "Debug macOS")     |               |          |
 | OpenBSD 6.6 | x86_64 | ![openbsd-release](https://shield.lwan.ws/img/gycKbr/release-openbsd "Release OpenBSD")       | ![openbsd-debug](https://shield.lwan.ws/img/gycKbr/debug-openbsd "Debug OpenBSD")     |               | ![openbsd-tests](https://shield.lwan.ws/img/gycKbr/openbsd-unit-tests "OpenBSD Tests")         |
 
+Installing
+----------
+
+You can either [build Lwan yourself](#Building), use a [container
+image](#container-images), or grab a package from [your favorite
+distribution](#lwan-in-the-wild).
+
 Building
 --------
 
@@ -36,7 +43,11 @@ The build system will look for these libraries and enable/link if available.
  - [Lua 5.1](http://www.lua.org) or [LuaJIT 2.0](http://luajit.org)
  - [Valgrind](http://valgrind.org)
  - [Brotli](https://github.com/google/brotli)
+    - Can be disabled by passing `-DENABLE_BROTLI=NO`
  - [ZSTD](https://github.com/facebook/zstd)
+    - Can be disabled by passing `-DENABLE_ZSTD=NO`
+ - On Linux builds, if `-DENABLE_TLS=ON` (default) is passed:
+    - [mbedTLS](https://github.com/ARMmbed/mbedtls)
  - Alternative memory allocators can be used by passing `-DUSE_ALTERNATIVE_MALLOC` to CMake with the following values:
     - ["mimalloc"](https://github.com/microsoft/mimalloc)
     - ["jemalloc"](http://jemalloc.net/)
@@ -46,12 +57,16 @@ The build system will look for these libraries and enable/link if available.
     - [Python](https://www.python.org/) (2.6+) with Requests
     - [Lua 5.1](http://www.lua.org)
  - To run benchmark:
-    - Special version of [Weighttp](https://github.com/lpereira/weighttp)
+    - [Weighttp](https://github.com/lpereira/weighttp) -- bundled and built alongside Lwan for convenience
     - [Matplotlib](https://github.com/matplotlib/matplotlib)
  - To build TechEmpower benchmark suite:
     - Client libraries for either [MySQL](https://dev.mysql.com) or [MariaDB](https://mariadb.org)
     - [SQLite 3](http://sqlite.org)
 
+> :bulb: **Note:** On non-x86_64 systems,
+> [libucontext](https://github.com/kaniini/libucontext) will be downloaded
+> and built alongside Lwan.  This will require a network connection, so keep
+> this in mind when packaging Lwan for non-x86_64 architectures.
 
 ### Common operating system package names
 
@@ -61,10 +76,10 @@ The build system will look for these libraries and enable/link if available.
  - Ubuntu 14+: `apt-get update && apt-get install git cmake zlib1g-dev pkg-config`
  - macOS: `brew install cmake`
 
-#### Build all examples
- - ArchLinux: `pacman -S cmake zlib sqlite luajit libmariadbclient gperftools valgrind`
+#### Build with all optional features
+ - ArchLinux: `pacman -S cmake zlib sqlite luajit libmariadbclient gperftools valgrind mbedtls`
  - FreeBSD: `pkg install cmake pkgconf sqlite3 lua51`
- - Ubuntu 14+: `apt-get update && apt-get install git cmake zlib1g-dev pkg-config lua5.1-dev libsqlite3-dev libmysqlclient-dev`
+ - Ubuntu 14+: `apt-get update && apt-get install git cmake zlib1g-dev pkg-config lua5.1-dev libsqlite3-dev libmysqlclient-dev libmbedtls-dev`
  - macOS: `brew install cmake mysql-connector-c sqlite lua@5.1 pkg-config`
 
 ### Build commands
@@ -108,15 +123,18 @@ This will generate a few binaries:
  - `src/bin/tools/mimegen`: Builds the extension-MIME type table. Used during build process.
  - `src/bin/tools/bin2hex`: Generates a C file from a binary file, suitable for use with #include.
  - `src/bin/tools/configdump`: Dumps a configuration file using the configuration reader API.
+ - `src/bin/tools/weighttp`: Rewrite of the `weighttp` HTTP benchmarking tool.
 
 #### Remarks
 
 Passing `-DCMAKE_BUILD_TYPE=Release` will enable some compiler
 optimizations (such as [LTO](http://gcc.gnu.org/wiki/LinkTimeOptimization))
-and tune the code for current architecture. *Please use this version
-when benchmarking*, as the default is the Debug build, which not only
-logs all requests to the standard output, but does so while holding a
-mutex.
+and tune the code for current architecture.
+
+> :exclamation: **Important:** *Please use the release build when benchmarking*, as
+> the default is the Debug build, which not only logs all requests to the
+> standard output, but does so while holding a lock, severely holding down
+> the server.
 
 The default build (i.e. not passing `-DCMAKE_BUILD_TYPE=Release`) will build
 a version suitable for debugging purposes.  This version can be used under
@@ -132,10 +150,18 @@ with, specify one of the following options to the CMake invocation line:
  - `-DSANITIZER=thread` selects the Thread Sanitizer.
 
 Alternative memory allocators can be selected as well.  Lwan currently
-supports [TCMalloc](https://github.com/gperftools/gperftools),
+supports [TCMalloc](https://github.com/google/tcmalloc),
 [mimalloc](https://github.com/microsoft/mimalloc), and
 [jemalloc](http://jemalloc.net/) out of the box.  To use either one of them,
-pass `-DALTERNATIVE_MALLOC=ON` to the CMake invocation line.
+pass `-DALTERNATIVE_MALLOC=name` to the CMake invocation line, using the
+names provided in the "Optional dependencies"  section.
+
+The `-DUSE_SYSLOG=ON` option can be passed to CMake to also log to the system log
+in addition to the standard output.
+
+If you're building Lwan for a distribution, it might be wise to use the
+`-DMTUNE_NATIVE=OFF` option, otherwise the generated binary may fail to
+run on some computers.
 
 ### Tests
 
@@ -165,10 +191,11 @@ Running
 -------
 
 Set up the server by editing the provided `lwan.conf`; the format is
-explained in details below.  (Lwan will try to find a configuration file
-based in the executable name in the current directory; `testrunner.conf`
-will be used for the `testrunner` binary, `lwan.conf` for the `lwan` binary,
-and so on.)
+explained in details below.
+
+> :bulb: **Note:** Lwan will try to find a configuration file based in the
+> executable name in the current directory; `testrunner.conf` will be used
+> for the `testrunner` binary, `lwan.conf` for the `lwan` binary, and so on.
 
 Configuration files are loaded from the current directory. If no changes
 are made to this file, running Lwan will serve static files located in
@@ -180,8 +207,9 @@ settings for the environment it's running on.  Many of these settings can
 be tweaked in the configuration file, but it's usually a good idea to not
 mess with them.
 
-Optionally, the `lwan` binary can be used for one-shot static file serving
-without any configuration file. Run it with `--help` for help on that.
+> :magic_wand: **Tip:** Optionally, the `lwan` binary can be used for one-shot
+> static file serving without any configuration file.  Run it with `--help`
+> for help on that.
 
 Configuration File
 ----------------
@@ -197,9 +225,10 @@ can be empty; in this case, curly brackets are optional.
 an implementation detail, code reading configuration options will only be
 given the version with underscores).
 
-Values can contain environment variables. Use the syntax `${VARIABLE_NAME}`.
-Default values can be specified with a colon (e.g.  `${VARIABLE_NAME:foo}`,
-which evaluates to `${VARIABLE_NAME}` if it's set, or `foo` otherwise).
+> :magic_wand: **Tip:** Values can contain environment variables. Use the
+> syntax `${VARIABLE_NAME}`.  Default values can be specified with a colon
+> (e.g.  `${VARIABLE_NAME:foo}`, which evaluates to `${VARIABLE_NAME}` if
+> it's set, or `foo` otherwise).
 
 ```
 sound volume = 11 # This one is 1 louder
@@ -233,8 +262,8 @@ Some examples can be found in `lwan.conf` and `techempower.conf`.
 #### Time Intervals
 
 Time fields can be specified using multipliers. Multiple can be specified, they're
-just added together; for instance, "1M 1w" specifies "1 month and 1 week".  The following
-table lists all known multipliers:
+just added together; for instance, "1M 1w" specifies "1 month and 1 week"
+(37 days).  The following table lists all known multipliers:
 
 | Multiplier | Description |
 |------------|-------------|
@@ -242,13 +271,13 @@ table lists all known multipliers:
 | `m`        | Minutes |
 | `h`        | Hours |
 | `d`        | Days |
-| `w`        | Weeks |
-| `M`        | Months |
-| `y`        | Years |
+| `w`        | 7-day Weeks |
+| `M`        | 30-day Months |
+| `y`        | 365-day Years |
 
-A number with a multiplier not in this table is ignored; a warning is issued while
-reading the configuration file.  No spaces must exist between the number and its
-multiplier.
+> :bulb: **Note:** A number with a multiplier not in this table is ignored; a
+> warning is issued while reading the configuration file.  No spaces must
+> exist between the number and its multiplier.
 
 #### Boolean Values
 
@@ -269,11 +298,20 @@ can be decided automatically, so some configuration options are provided.
 |--------|------|---------|-------------|
 | `keep_alive_timeout` | `time`  | `15` | Timeout to keep a connection alive |
 | `quiet` | `bool` | `false` | Set to true to not print any debugging messages. Only effective in release builds. |
-| `reuse_port` | `bool` | `false` | Sets `SO_REUSEPORT` to `1` in the master socket |
 | `expires` | `time` | `1M 1w` | Value of the "Expires" header. Default is 1 month and 1 week |
 | `threads` | `int` | `0` | Number of I/O threads. Default (0) is the number of online CPUs |
 | `proxy_protocol` | `bool` | `false` | Enables the [PROXY protocol](https://www.haproxy.com/blog/haproxy/proxy-protocol/). Versions 1 and 2 are supported. Only enable this setting if using Lwan behind a proxy, and the proxy supports this protocol; otherwise, this allows anybody to spoof origin IP addresses |
 | `max_post_data_size` | `int` | `40960` | Sets the maximum number of data size for POST requests, in bytes |
+| `max_put_data_size` | `int` | `40960` | Sets the maximum number of data size for PUT requests, in bytes |
+| `allow_temp_files` | `str` | `""` | Use temporary files; set to `post` for POST requests, `put` for PUT requests, or `all` (equivalent to setting to `post put`) for both.|
+| `error_template` | `str` | Default error template | Template for error codes. See variables below. |
+
+#### Variables for `error_template`
+
+| Variable | Type | Description |
+|----------|------|-------------|
+| `short_message` | `str` | Short error message (e.g. `Not found`) |
+| `long_message` | `str` | Long error message (e.g. `The requested resource could not be found on this server`) |
 
 ### Straitjacket
 
@@ -289,6 +327,10 @@ it is a top level declaration), if any directories are open, due to
 e.g.  instantiating the `serve_files` module, Lwan will refuse to
 start.  (This check is only performed on Linux as a safeguard for
 malconfiguration.)
+
+> :magic_wand: **Tip:** Declare a Straitjacket right before a `site` section
+> in such a way that configuration files and private data (e.g. TLS keys)
+> are out of reach of the server after initialization has taken place.
 
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|
@@ -326,23 +368,78 @@ actual values while servicing requests.  These include but is not limited to:
   - `Transfer-Encoding`
   - All `Access-Control-Allow-` headers
 
-Header names are also case-insensitive (and case-preserving).  Overriding
-`SeRVeR` will override the `Server` header, but send it the way it was
-written in the configuration file.
+> :bulb: **Note:** Header names are also case-insensitive (and case-preserving).  Overriding
+> `SeRVeR` will override the `Server` header, but send it the way it was
+> written in the configuration file.
 
 ### Listeners
 
-In order to specify which interfaces Lwan should listen on, a `listener` section
-must be specified.  Only one listener per Lwan process is accepted at the moment.
-The only parameter to a listener block is the interface address and the port to
-listen on; anything inside a listener section are instances of modules.
+Only two listeners are supported per Lwan process: the HTTP listener (`listener`
+section), and the HTTPS listener (`tls_listener` section).  Only one listener
+of each type is allowed.
 
-The syntax for the listener parameter is `${ADDRESS}:${PORT}`, where `${ADDRESS}`
-can either be `*` (binding to all interfaces), an IPv6 address (if surrounded by
-square brackets), an IPv4 address, or a hostname.  If systemd's socket activation
-is used, `systemd` can be specified as a parameter.
+> :warning: **Warning:** TLS support is experimental.  Although it is stable
+> during initial testing, your mileage may vary. Only TLSv1.2 is supported
+> at this point, but TLSv1.3 is planned.
 
-### Routing URLs Using Modules or Handlers
+> :bulb: **Note:** TLS support requires :penguin: Linux with the `tls.ko`
+> module built-in or loaded.  Support for other operating systems may be
+> added in the future.  FreeBSD seems possible, other operating systems
+> do not seem to offer similar feature.  For unsupported operating systems,
+> using a TLS terminator proxy such as [Hitch](https://hitch-tls.org/) is a good
+> option.
+
+For both `listener` and `tls_listener` sections, the only parameter is the
+the interface address and port to listen on.  The listener syntax is
+`${ADDRESS}:${PORT}`, where `${ADDRESS}` can either be `*` (binding to all
+interfaces), an IPv6 address (if surrounded by square brackets), an IPv4
+address, or a hostname.  For instance, `listener localhost:9876` would
+listen only in the `lo` interface, port `9876`.
+
+While a `listener` section takes no keys, a `tls_listener` section requires
+two: `cert` and `key` (each pointing, respectively, to the location on disk
+where the TLS certificate and private key files are located) and takes an
+optional boolean `hsts` key, which controls if `Strict-Transport-Security`
+headers will be sent on HTTPS responses.
+
+> :magic_wand: **Tip:** To generate these keys for testing purposes, the
+> OpenSSL command-line tool can be used like the following:
+> `openssl req -nodes -x509 -newkey rsa:4096 -keyout key.pem -out cert.pem -sha256 -days 7`
+
+> :bulb: **Note:** It's recommended that a [Straitjacket](#Straitjacket) with a `chroot` option is declared
+> right after a `tls_listener` section, in such a way that the paths to the
+> certificate and key are out of reach from that point on.
+
+If systemd socket activation is used, `systemd` can be specified as a
+parameter.  (If multiple listeners from systemd are specified,
+`systemd:FileDescriptorName` can be specified, where `FileDescriptorName`
+follows the [conventions set in the `systemd.socket` documentation](https://www.freedesktop.org/software/systemd/man/systemd.socket.html).)
+
+Examples:
+
+```
+listener *:8080		# Listen on all interfaces, port 8080, HTTP
+
+tls_listener *:8081 {	# Listen on all interfaces, port 8081, HTTPS
+	cert = /path/to/cert.pem
+	key = /path/to/key.pem
+}
+
+# Use named systemd socket activation for HTTP listener
+listener systemd:my-service-http.socket
+
+# Use named systemd socket activation for HTTPS listener
+tls_listener systemd:my-service-https.socket {
+	...
+}
+```
+
+### Site
+
+A `site` section groups instances of modules and handlers that will respond to
+requests to a given URL prefix.
+
+#### Routing URLs Using Modules or Handlers
 
 In order to route URLs, Lwan matches the largest common prefix from the request
 URI with a set of prefixes specified in the listener section.  How a request to
@@ -363,9 +460,10 @@ section can be present in the declaration of a module instance.  Handlers do
 not take any configuration options, but may include the `authorization`
 section.
 
-A list of built-in modules can be obtained by executing Lwan with the `-m`
-command-line argument.  The following is some basic documentation for the
-modules shipped with Lwan.
+> :magic_wand: **Tip:** A list of built-in modules can be obtained by
+> executing Lwan with the `-m` command-line argument.
+
+The following is some basic documentation for the modules shipped with Lwan.
 
 #### File Serving
 
@@ -385,6 +483,20 @@ best to serve files in the fastest way possible according to some heuristics.
 | `read_ahead`               | `int`  | `131702`     | Maximum amount of bytes to read ahead when caching open files.  A value of `0` disables readahead.  Readahead is performed by a low priority thread to not block the I/O threads while file extents are being read from the filesystem. |
 | `cache_for`                | `time` | `5s`         | Time to keep file metadata (size, compressed contents, open file descriptor, etc.) in cache |
 
+##### Variables for `directory_list_template`
+
+| Variable | Type | Description |
+|----------|------|-------------|
+| `rel_path` | `str` | Path relative to the root directory real path |
+| `readme`   | `str` | Contents of first readme file found (`readme`, `readme.txt`, `read.me`, `README.TXT`, `README`) |
+| `file_list` | iterator | Iterates on file list |
+| `file_list.zebra_class` | `str` | `odd` for odd items, or `even` or even items |
+| `file_list.icon` | `str` | Path to the icon for the file type |
+| `file_list.name` | `str` | File name (escaped) |
+| `file_list.type` | `str` | File type (directory or regular file) |
+| `file_list.size` | `int` | File size |
+| `file_list.unit` | `str` | Unit for `file_size` |
+
 #### Lua
 
 The `lua` module will allow requests to be serviced by scripts written in
@@ -394,22 +506,29 @@ frameworks such as [Sailor](https://github.com/lpereira/sailor-hello-lwan).
 
 Scripts can be served from files or embedded in the configuration file, and
 the results of loading them, the standard Lua modules, and (optionally, if
-using LuaJIT) optimizing the code will be cached for a while.  Each I/O
-thread in Lwan will create an instance of a Lua VM (i.e.  one `lua_State`
-struct for every I/O thread), and each Lwan coroutine will spawn a Lua
-thread (with `lua_newthread()`) per request.  Because of this, Lua scripts
-can't use global variables, as they may be not only serviced by different
-threads, but the state will be available only for the amount of time
-specified in the `cache_period` configuration option.
+using LuaJIT) optimizing the code will be cached for a while.
+
+> :bulb: **Note:** Lua scripts can't use global variables, as they may be not
+> only serviced by different threads, but the state will be available only
+> for the amount of time specified in the `cache_period` configuration
+> option.  This is because each I/O thread in Lwan will create an instance
+> of a Lua VM (i.e.  one `lua_State` struct for every I/O thread), and each
+> Lwan coroutine will spawn a Lua thread (with `lua_newthread()`) per
+> request.
 
 There's no need to have one instance of the Lua module for each endpoint; a
 single script, embedded in the configuration file or otherwise, can service
 many different endpoints.  Scripts are supposed to implement functions with
 the following signature: `handle_${METHOD}_${ENDPOINT}(req)`, where
 `${METHOD}` can be a HTTP method (i.e.  `get`, `post`, `head`, etc.), and
-`${ENDPOINT}` is the desired endpoint to be handled by that function.  The
-special `${ENDPOINT}` `root` can be specified to act as a catchall.  The
-`req` parameter points to a metatable that contains methods to obtain
+`${ENDPOINT}` is the desired endpoint to be handled by that function.
+
+> :magic_wand: **Tip:** Use the `root` endpoint for a catchall. For example,
+> the handler function `handle_get_root()` will be called if no other handler
+> could be found for that request.  If no catchall is specified, the server
+> will return a `404 Not Found` error.
+
+The `req` parameter points to a metatable that contains methods to obtain
 information from the request, or to set the response, as seen below:
 
    - `req:query_param(param)` returns the query parameter (from the query string) with the key `param`, or `nil` if not found
@@ -419,10 +538,21 @@ information from the request, or to set the response, as seen below:
    - `req:send_event(event, str)` sends an event (using server-sent events)
    - `req:cookie(param)` returns the cookie named `param`, or `nil` is not found
    - `req:set_headers(tbl)` sets the response headers from the table `tbl`; a header may be specified multiple times by using a table, rather than a string, in the table value (`{'foo'={'bar', 'baz'}}`); must be called before sending any response with `say()` or `send_event()`
+   - `req:header(name)` obtains the header from the request with the given name or `nil` if not found
    - `req:sleep(ms)` pauses the current handler for the specified amount of milliseconds
    - `req:ws_upgrade()` returns `1` if the connection could be upgraded to a WebSocket; `0` otherwise
-   - `req:ws_write(str)` sends `str` through the WebSocket-upgraded connection
+   - `req:ws_write_text(str)` sends `str` through the WebSocket-upgraded connection as text frame
+   - `req:ws_write_binary(str)` sends `str` through the WebSocket-upgraded connection as binary frame
+   - `req:ws_write(str)` sends `str` through the WebSocket-upgraded connection as text or binary frame, depending on content containing only ASCII characters or not
    - `req:ws_read()` returns a string with the contents of the last WebSocket frame, or a number indicating an status (ENOTCONN/107 on Linux if it has been disconnected; EAGAIN/11 on Linux if nothing was available; ENOMSG/42 on Linux otherwise).  The return value here might change in the future for something more Lua-like.
+   - `req:remote_address()` returns a string with the remote IP address.
+   - `req:path()` returns a string with the request path.
+   - `req:query_string()` returns a string with the query string (empty string if no query string present).
+   - `req:body()` returns the request body (POST/PUT requests).
+   - `req:request_id()` returns a string containing the request ID.
+   - `req:request_date()` returns the date as it'll be written in the `Date` response header.
+   - `req:is_https()` returns `true` if this request is serviced through HTTPS, `false` otherwise.
+   - `req:host()` returns the value of the `Host` header if present, otherwise `nil`.
 
 Handler functions may return either `nil` (in which case, a `200 OK` response
 is generated), or a number matching an HTTP status code.  Attempting to return
@@ -443,18 +573,19 @@ The `rewrite` module will match
 to either redirect to another URL, or rewrite the request in a way that Lwan
 will handle the request as if it were made in that way originally.
 
-Forked from Lua 5.3.1, the regular expresion engine may not be as
-feature-packed as most general-purpose engines, but has been chosen
-specifically because it is a [deterministic finite
-automaton](https://en.wikipedia.org/wiki/Deterministic_finite_automaton) in
-an attempt to make some kinds of [denial of service
-attacks](https://owasp.org/www-community/attacks/Regular_expression_Denial_of_Service_-_ReDoS)
-not possible.
+> :information_source: **Info:** Forked from Lua 5.3.1, the regular expresion
+> engine may not be as feature-packed as most general-purpose engines, but
+> has been chosen specifically because it is a [deterministic finite
+> automaton](https://en.wikipedia.org/wiki/Deterministic_finite_automaton)
+> in an attempt to make some kinds of [denial of service
+> attacks](https://owasp.org/www-community/attacks/Regular_expression_Denial_of_Service_-_ReDoS)
+> impossible.
 
-The new URL can be specified using a
-simple text substitution syntax, or use Lua scripts; Lua scripts will
-contain the same metamethods available in the `req` metatable provided by
-the Lua module, so it can be quite powerful.
+The new URL can be specified using a simple text substitution syntax, or use Lua scripts.
+
+> :magic_wand: **Tip:** Lua scripts will contain the same metamethods
+> available in the `req` metatable provided by the Lua module, so it can be
+> quite powerful.
 
 Each instance of the rewrite module will require a `pattern` and the action
 to execute when such pattern is matched.  Patterns are evaluated in the
@@ -501,6 +632,81 @@ every pattern.
 `redirect_to` and `rewrite_as` options are mutually exclusive, and one of
 them must be specified at least.
 
+It's also possible to specify conditions to trigger a rewrite.  To specify one,
+open a `condition` block, specify the condition type, and then the parameters
+for that condition to be evaluated:
+
+|Condition          |Can use subst. syntax|Section required|Parameters|Description|
+|-------------------|---------------------|----------------|----------|-----------|
+|`cookie`           | Yes | Yes | A single `key` = `value`| Checks if request has cookie `key` has value `value` |
+|`query`            | Yes | Yes | A single `key` = `value`| Checks if request has query variable `key` has value `value` |
+|`post`             | Yes | Yes | A single `key` = `value`| Checks if request has post data `key` has value `value` |
+|`header`           | Yes | Yes | A single `key` = `value`| Checks if request header `key` has value `value` |
+|`environment`      | Yes | Yes | A single `key` = `value`| Checks if environment variable `key` has value `value` |
+|`stat`             | Yes | Yes | `path`, `is_dir`, `is_file` | Checks if `path` exists in the filesystem, and optionally checks if `is_dir` or `is_file` |
+|`encoding`         | No  | Yes | `deflate`, `gzip`, `brotli`, `zstd`, `none` | Checks if client accepts responses in a determined encoding (e.g. `deflate = yes` for Deflate encoding) |
+|`proxied`          | No  | No  | Boolean | Checks if request has been proxied through PROXY protocol |
+|`http_1.0`         | No  | No  | Boolean | Checks if request is made with a HTTP/1.0 client |
+|`is_https`         | No  | No  | Boolean | Checks if request is made through HTTPS |
+|`has_query_string` | No  | No  | Boolean | Checks if request has a query string (even if empty) |
+|`method`           | No  | No  | Method name | Checks if HTTP method is the one specified |
+|`lua`              | No  | No  | String | Runs Lua function `matches(req)` inside String and checks if it returns `true` or `false` |
+|`backref`          | No  | Yes | A single `backref index` = `value` | Checks if the backref number matches the provided value |
+
+*Can use subst. syntax* refers to the ability to reference the matched
+pattern using the same substitution syntax used for the `rewrite as` or
+`redirect to` actions.  For instance, `condition cookie { some-cookie-name =
+foo-%1-bar }` will substitute `%1` with the first match from the pattern
+this condition is related to.
+
+> :bulb: **Note:** Conditions that do not require a section have to be written
+> as a key; for instance, `condition has_query_string = yes`.
+
+For example, if one wants to send `site-dark-mode.css` if there is a
+`style` cookie with the value `dark`, and send `site-light-mode.css`
+otherwise, one can write:
+
+```
+pattern site.css {
+   rewrite as = /site-dark-mode.css
+   condition cookie { style = dark }
+}
+pattern site.css {
+   rewrite as = /site-light-mode.css
+}
+```
+
+Another example: if one wants to send pre-compressed files
+if they do exist in the filesystem and the user requested them:
+
+```
+pattern (%g+) {
+   condition encoding { brotli = yes }
+   condition stat { path = %1.brotli }
+   rewrite as = %1.brotli
+}
+pattern (%g+) {
+   condition encoding { gzip = yes }
+   condition stat { path = %1.gzip }
+   rewrite as = %1.gzip
+}
+pattern (%g+) {
+   condition encoding { zstd = yes }
+   condition stat { path = %1.zstd }
+   rewrite as = %1.zstd
+}
+pattern (%g+) {
+   condition encoding { deflate = yes }
+   condition stat { path = %1.deflate }
+   rewrite as = %1.deflate
+}
+```
+
+> :bulb: **Note:** In general, this is not necessary, as the file serving
+> module will do this automatically and pick the smallest file available for
+> the requested encoding, cache it for a while, but this shows it's possible
+> to have a similar feature by configuration alone.
+
 #### Redirect
 
 The `redirect` module will, as it says in the tin, generate a `301
@@ -535,6 +741,21 @@ a `404 Not Found` error will be sent instead.
 |--------|------|---------|-------------|
 | `code` | `int` | `999` | A HTTP response code |
 
+#### FastCGI
+
+The `fastcgi` module proxies requests between the HTTP client connecting to
+Lwan and a FastCGI server accessible by Lwan.  This is useful, for instance,
+to serve pages from a scripting language such as PHP.
+
+> :bulb: **Note:** This is a preliminary version of this module, and
+> as such, it's not well optimized and some features are missing.
+
+| Option | Type | Default | Description |
+|--------|------|---------|-------------|
+| `address` | `str` |  | Address to connect to. Can be a file path (for Unix Domain Sockets), IPv4 address (`aaa.bbb.ccc.ddd:port`), or IPv6 address (`[...]:port`). |
+| `script_path` | `str` |  | Location where the CGI scripts are located. |
+| `default_index` | `str` | `index.php` | Default script to execute if unspecified in the request URI. |
+
 ### Authorization Section
 
 Authorization sections can be declared in any module instance or handler,
@@ -547,6 +768,10 @@ section with a `basic` parameter, and set one of its options.
 |--------|------|---------|-------------|
 | `realm` | `str` | `Lwan` | Realm for authorization. This is usually shown in the user/password UI in browsers |
 | `password_file` | `str` | `NULL` | Path for a file containing username and passwords (in clear text).  The file format is the same as the configuration file format used by Lwan |
+
+> :warning: **Warning:** Not only passwords are stored in clear text in a file
+> that should be accessible by the server, they'll be kept in memory for a few
+> seconds.  Avoid using this feature if possible.
 
 Hacking
 -------
@@ -594,9 +819,22 @@ Lwan is automatically fuzz-tested by
 though, one can [follow the instructions to test
 locally](https://github.com/google/oss-fuzz/blob/master/docs/new_project_guide.md#testing-locally).
 
-This fuzzes only the request parsing code.  There are plans to add fuzzing
-drivers for other parts of the code, including the rewriting engine,
-configuration file reader, template parser, and URL routing.
+Currently, there are fuzzing drivers for the request parsing code, the
+configuration file parser, the template parser, and the Lua string pattern
+matching library used in the rewrite module.
+
+Adding new fuzzers is trivial:
+
+- Fuzzers are implemented in C++ and the sources are placed in
+  `src/bin/fuzz`.
+- Fuzzers should be named `${FUZZER_NAME}_fuzzer.cc`.  Look at the OSS-Fuzz
+  documentation and other fuzzers on information about how to write these.
+- These files are not compiled by the Lwan build system, but rather by the
+  build scripts used by OSS-Fuzz.  To test your fuzzer, please follow the
+  instructions to test locally, which will build the fuzzer in the
+  environment they'll be executed in.
+- A fuzzing corpus has to be provided in `src/fuzz/corpus`.  Files have to
+  be named `corpus-${FUZZER_NAME}-${UNIQUE_ID}`.
 
 ### Exporting APIs
 
@@ -702,9 +940,8 @@ Without keep-alive, these numbers drop around 6-fold.
 IRC Channel
 -----------
 
-There is an IRC channel (`#lwan`) on [Freenode](http://freenode.net). A
-standard IRC client can be used.  A [web IRC gateway](http://webchat.freenode.net?channels=%23lwan&uio=d4)
-is also available.
+There is an IRC channel (`#lwan`) on [Libera](https://libera.chat). A
+standard IRC client can be used.
 
 Lwan in the wild
 ----------------
@@ -721,6 +958,7 @@ been seen in the wild.  *Help build this list!*
 
 Some other distribution channels were made available as well:
 
+* Container images are available from the [ghcr.io/lpereira/lwan](GitHub Container Registry).  [More information below](#container-images).
 * A `Dockerfile` is maintained by [@jaxgeller](https://github.com/jaxgeller), and is [available from the Docker registry](https://hub.docker.com/r/jaxgeller/lwan/).
 * A buildpack for Heroku is maintained by [@bherrera](https://github.com/bherrera), and is [available from its repo](https://github.com/bherrera/heroku-buildpack-lwan).
 * Lwan is also available as a package in [Biicode](http://docs.biicode.com/c++/examples/lwan.html).
@@ -741,7 +979,8 @@ Lwan has been also used as a benchmark:
 
 Mentions in academic journals:
 
-* [A dynamic predictive race detector for C/C++ programs](https://link.springer.com/article/10.1007/s11227-017-1996-8) uses Lwan as a "real world example".
+* [A dynamic predictive race detector for C/C++ programs (in English, published 2017)](https://link.springer.com/article/10.1007/s11227-017-1996-8) uses Lwan as a "real world example".
+* [High-precision Data Race Detection Method for Large Scale Programs (in Chinese, published 2021)](http://www.jos.org.cn/jos/article/abstract/6260) also uses Lwan as one of the case studies.
 
 Some talks mentioning Lwan:
 
@@ -749,13 +988,43 @@ Some talks mentioning Lwan:
 * This [talk about Iron](https://michaelsproul.github.io/iron-talk/), a framework for Rust, mentions Lwan as an *insane C thing*.
 * [University seminar presentation](https://github.com/cu-data-engineering-s15/syllabus/blob/master/student_lectures/LWAN.pdf) about Lwan.
 * This [presentation about Sailor web framework](http://www.slideshare.net/EtieneDalcol/web-development-with-lua-bulgaria-web-summit) mentions Lwan.
-* [Performance and Scale @ Istio Service Mesh](https://www.youtube.com/watch?v=G4F5aRFEXnU), at around 7:30min, presented at KubeCon Europe 2018, mentions that Lwan is used on the server side for testing due to its performance and robustness.
+* [Performance and Scale @ Istio Service Mesh](https://www.youtube.com/watch?v=G4F5aRFEXnU), presented at KubeCon Europe 2018, mentions (at the 7:30 mark) that Lwan is used on the server side for testing due to its performance and robustness.
 * [A multi-core Python HTTP server (much) faster than Go (spoiler: Cython)](https://www.youtube.com/watch?v=mZ9cXOH6NYk) presented at PyConFR 2018 by J.-P. Smets mentions [Nexedi's work](https://www.nexedi.com/NXD-Blog.Multicore.Python.HTTP.Server) on using Lwan as a backend for Python services with Cython.
 
 Not really third-party, but alas:
 
 * The [author's blog](http://tia.mat.br).
 * The [project's webpage](http://lwan.ws).
+
+Container Images
+----------------
+
+Lwan container images are available at
+[ghcr.io/lpereira/lwan](https://ghcr.io/lpereira/lwan).  Container runtimes
+like [Docker](https://docker.io) or [Podman](https://podman.io) may be used
+to build and run Lwan in a container.
+
+### Pull lwan images from GHCR
+Container images are tagged with release version numbers, so a specific version of Lwan can be pulled.
+
+    # latest version
+    docker pull ghcr.io/lpereira/lwan:latest
+    # pull a specific version
+    docker pull ghcr.io/lpereira/lwan:v0.3
+
+### Build images locally
+Clone the repository and use `Containerfile` (Dockerfile) to build Lwan with all optional dependencies enabled.
+
+    podman build -t lwan .
+
+### Run your image
+The image expects to find static content at `/wwwroot`, so a volume containing your content can be mounted.
+
+    docker run --rm -p 8080:8080 -v ./www:/wwwroot lwan
+
+To bring your own `lwan.conf`, simply mount it at `/lwan.conf`.
+
+    podman run --rm -p 8080:8080 -v ./lwan.conf:/lwan.conf lwan
 
 Lwan quotes
 -----------
@@ -802,3 +1071,5 @@ in no particular order.  Contributions are appreciated:
 
 > "Impressive all and all, even more for being written in (grokkable!) C. Nice work."
 > [tpaschalis](https://news.ycombinator.com/item?id=17550961)
+
+> "LWAN was a complete failure" [dermetfan](http://dermetfan.net/posts/zig-with-c-web-servers.html)

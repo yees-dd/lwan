@@ -1,6 +1,6 @@
 /*
- * lwan - simple web server
- * Copyright (c) 2013 Leandro A. F. Pereira <leandro@hardinfo.org>
+ * lwan - web server
+ * Copyright (c) 2013 L. A. F. Pereira <l@tia.mat.br>
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -39,17 +39,19 @@ lwan_writev(struct lwan_request *request, struct iovec *iov, int iov_count)
     int flags = (request->conn->flags & CONN_CORK) ? MSG_MORE : 0;
 
     for (int tries = MAX_FAILED_TRIES; tries;) {
+        const int remaining_len = (int)(iov_count - curr_iov);
         ssize_t written;
 
-        if (flags) {
-            struct msghdr hdr = {
-                .msg_iov = iov + curr_iov,
-                .msg_iovlen = (size_t)(iov_count - curr_iov),
-            };
-            written = sendmsg(request->fd, &hdr, flags);
-        } else {
-            written = writev(request->fd, iov + curr_iov, iov_count - curr_iov);
+        if (remaining_len == 1) {
+            const struct iovec *vec = &iov[curr_iov];
+            return lwan_send(request, vec->iov_base, vec->iov_len, flags);
         }
+
+        struct msghdr hdr = {
+            .msg_iov = iov + curr_iov,
+            .msg_iovlen = (size_t)remaining_len,
+        };
+        written = sendmsg(request->fd, &hdr, flags);
 
         if (UNLIKELY(written < 0)) {
             /* FIXME: Consider short writes as another try as well? */
@@ -216,8 +218,22 @@ void lwan_sendfile(struct lwan_request *request,
                    const char *header,
                    size_t header_len)
 {
-    size_t chunk_size = LWAN_MIN(count, 1ul << 17);
+    /* Clamp each chunk to 2^21 bytes[1] to balance throughput and
+     * scalability.  This used to be capped to 2^14 bytes, as that's the
+     * maximum TLS record size[2], but was found to be hurtful for
+     * performance[2], so use the same default value that Nginx uses.
+     *
+     * First chunk is clamped to 2^21 - header_len, because the header is
+     * sent using MSG_MORE.  Subsequent chunks are sized 2^21 bytes.  (Do
+     * this regardless of this connection being TLS or not for simplicity.)
+     *
+     * [1] https://www.kernel.org/doc/html/v5.12/networking/tls.html#sending-tls-application-data
+     * [2] https://github.com/lpereira/lwan/issues/334
+     */
+    size_t chunk_size = LWAN_MIN(count, (1ul << 21) - header_len);
     size_t to_be_written = count;
+
+    assert(header_len < (1ul << 21));
 
     lwan_send(request, header, header_len, MSG_MORE);
 
@@ -238,7 +254,7 @@ void lwan_sendfile(struct lwan_request *request,
         if (!to_be_written)
             break;
 
-        chunk_size = LWAN_MIN(to_be_written, 1ul << 19);
+        chunk_size = LWAN_MIN(to_be_written, 1ul << 21);
         lwan_readahead_queue(in_fd, offset, chunk_size);
 
     try_again:

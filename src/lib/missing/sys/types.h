@@ -1,6 +1,6 @@
 /*
- * lwan - simple web server
- * Copyright (c) 2012 Leandro A. F. Pereira <leandro@hardinfo.org>
+ * lwan - web server
+ * Copyright (c) 2012 L. A. F. Pereira <l@tia.mat.br>
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -23,7 +23,7 @@
 #ifndef MISSING_SYS_TYPES_H
 #define MISSING_SYS_TYPES_H
 
-#ifndef HAVE_GETTID
+#ifndef LWAN_HAVE_GETTID
 pid_t gettid(void);
 #endif
 

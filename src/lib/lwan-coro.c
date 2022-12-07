@@ -1,6 +1,6 @@
 /*
- * lwan - simple web server
- * Copyright (c) 2012 Leandro A. F. Pereira <leandro@hardinfo.org>
+ * lwan - web server
+ * Copyright (c) 2012 L. A. F. Pereira <l@tia.mat.br>
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -33,7 +33,7 @@
 #include "lwan-array.h"
 #include "lwan-coro.h"
 
-#if !defined(NDEBUG) && defined(HAVE_VALGRIND)
+#if !defined(NDEBUG) && defined(LWAN_HAVE_VALGRIND)
 #define INSTRUMENT_FOR_VALGRIND
 #include <valgrind.h>
 #include <memcheck.h>
@@ -54,16 +54,13 @@ void __asan_unpoison_memory_region(void const volatile *addr, size_t size);
 #define SIGSTKSZ 16384
 #endif
 
-#ifdef HAVE_BROTLI
-#define CORO_STACK_SIZE (8 * SIGSTKSZ)
+#ifdef LWAN_HAVE_BROTLI
+#define CORO_STACK_SIZE ((size_t)(8 * SIGSTKSZ))
 #else
-#define CORO_STACK_SIZE (4 * SIGSTKSZ)
+#define CORO_STACK_SIZE ((size_t)(4 * SIGSTKSZ))
 #endif
 
 #define CORO_BUMP_PTR_ALLOC_SIZE 1024
-
-static_assert(DEFAULT_BUFFER_SIZE < CORO_STACK_SIZE,
-              "Request buffer fits inside coroutine stack");
 
 #if (!defined(NDEBUG) && defined(MAP_STACK)) || defined(__OpenBSD__)
 /* As an exploit mitigation, OpenBSD requires any stacks to be allocated via
@@ -71,13 +68,24 @@ static_assert(DEFAULT_BUFFER_SIZE < CORO_STACK_SIZE,
  *
  * Also enable this on debug builds to catch stack overflows while testing
  * (MAP_STACK exists in Linux, but it's a no-op).  */
-
 #define ALLOCATE_STACK_WITH_MMAP
+#endif
 
-static_assert((CORO_STACK_SIZE % PAGE_SIZE) == 0,
-              "Coroutine stack size is a multiple of page size");
-static_assert((CORO_STACK_SIZE >= PAGE_SIZE),
-              "Coroutine stack size is at least a page long");
+#ifndef NDEBUG
+__attribute__((constructor)) static void assert_sizes_are_sane(void)
+{
+    /* This is done in runtime rather than during compilation time because
+     * in Glibc >= 2.34, SIGSTKSZ is defined as sysconf(_SC_MINSIGSTKSZ). */
+
+    /* Request buffer fits inside coroutine stack */
+    assert(DEFAULT_BUFFER_SIZE < CORO_STACK_SIZE);
+#ifdef ALLOCATE_STACK_WITH_MMAP
+    /* Coroutine stack size is a multiple of page size */
+    assert((CORO_STACK_SIZE % PAGE_SIZE) == 0);
+    /* Coroutine stack size is at least a page long */
+    assert((CORO_STACK_SIZE >= PAGE_SIZE));
+#endif
+}
 #endif
 
 typedef void (*defer1_func)(void *data);
@@ -142,7 +150,7 @@ struct coro {
  * (or later).  I'm not sure if I can distribute them inside a GPL program;
  * they're straightforward so I'm assuming there won't be any problem; if
  * there is, I'll just roll my own.
- *     -- Leandro
+ *     -- L.
  */
 #if defined(__x86_64__)
 void __attribute__((noinline, visibility("internal")))
@@ -173,34 +181,10 @@ asm(".text\n\t"
     "movq   64(%rsi),%rcx\n\t"
     "movq   56(%rsi),%rsi\n\t"
     "jmpq   *%rcx\n\t");
-#elif defined(__i386__)
-void __attribute__((noinline, visibility("internal")))
-coro_swapcontext(coro_context *current, coro_context *other);
-asm(".text\n\t"
-    ".p2align 5\n\t"
-    ASM_ROUTINE(coro_swapcontext)
-    "movl   0x4(%esp),%eax\n\t"
-    "movl   %ecx,0x1c(%eax)\n\t" /* ECX */
-    "movl   %ebx,0x0(%eax)\n\t"  /* EBX */
-    "movl   %esi,0x4(%eax)\n\t"  /* ESI */
-    "movl   %edi,0x8(%eax)\n\t"  /* EDI */
-    "movl   %ebp,0xc(%eax)\n\t"  /* EBP */
-    "movl   (%esp),%ecx\n\t"
-    "movl   %ecx,0x14(%eax)\n\t" /* EIP */
-    "leal   0x4(%esp),%ecx\n\t"
-    "movl   %ecx,0x18(%eax)\n\t" /* ESP */
-    "movl   8(%esp),%eax\n\t"
-    "movl   0x14(%eax),%ecx\n\t" /* EIP (1) */
-    "movl   0x18(%eax),%esp\n\t" /* ESP */
-    "pushl  %ecx\n\t"            /* EIP (2) */
-    "movl   0x0(%eax),%ebx\n\t"  /* EBX */
-    "movl   0x4(%eax),%esi\n\t"  /* ESI */
-    "movl   0x8(%eax),%edi\n\t"  /* EDI */
-    "movl   0xc(%eax),%ebp\n\t"  /* EBP */
-    "movl   0x1c(%eax),%ecx\n\t" /* ECX */
-    "ret\n\t");
+#elif defined(LWAN_HAVE_LIBUCONTEXT)
+#define coro_swapcontext(cur, oth) libucontext_swapcontext(cur, oth)
 #else
-#define coro_swapcontext(cur, oth) swapcontext(cur, oth)
+#error Unsupported platform.
 #endif
 
 __attribute__((used, visibility("internal")))
@@ -272,34 +256,17 @@ void coro_reset(struct coro *coro, coro_function_t func, void *data)
 
 #define STACK_PTR 9
     coro->context[STACK_PTR] = (rsp & ~0xful) - 0x8ul;
-#elif defined(__i386__)
-    stack = (unsigned char *)(uintptr_t)(stack + CORO_STACK_SIZE);
-
-    /* Make room for 3 args */
-    stack -= sizeof(uintptr_t) * 3;
-    /* Ensure 4-byte alignment */
-    stack = (unsigned char *)((uintptr_t)stack & (uintptr_t)~0x3);
-
-    uintptr_t *argp = (uintptr_t *)stack;
-    *argp++ = 0;
-    *argp++ = (uintptr_t)coro;
-    *argp++ = (uintptr_t)func;
-    *argp++ = (uintptr_t)data;
-
-    coro->context[5 /* EIP */] = (uintptr_t)coro_entry_point;
-
-#define STACK_PTR 6
-    coro->context[STACK_PTR] = (uintptr_t)stack;
-#else
-    getcontext(&coro->context);
+#elif defined(LWAN_HAVE_LIBUCONTEXT)
+    libucontext_getcontext(&coro->context);
 
     coro->context.uc_stack.ss_sp = stack;
     coro->context.uc_stack.ss_size = CORO_STACK_SIZE;
     coro->context.uc_stack.ss_flags = 0;
     coro->context.uc_link = NULL;
 
-    makecontext(&coro->context, (void (*)())coro_entry_point, 3, coro, func,
-                data);
+    libucontext_makecontext(&coro->context, (void (*)())coro_entry_point, 3,
+                            coro, func, data);
+
 #endif
 }
 
@@ -393,22 +360,71 @@ void coro_free(struct coro *coro)
     free(coro);
 }
 
-ALWAYS_INLINE void coro_defer(struct coro *coro, defer1_func func, void *data)
+static void disarmed_defer(void *data __attribute__((unused)))
+{
+}
+
+static void coro_defer_disarm_internal(struct coro *coro,
+                                       struct coro_defer *defer)
+{
+    const size_t num_defers = coro_defer_array_len(&coro->defer);
+
+    assert(num_defers != 0 && defer != NULL);
+
+    if (defer == coro_defer_array_get_elem(&coro->defer, num_defers - 1)) {
+        /* If we're disarming the last defer we armed, there's no need to waste
+         * space of a deferred callback to an empty function like
+         * disarmed_defer(). */
+        struct lwan_array *defer_base = (struct lwan_array *)&coro->defer;
+        defer_base->elements--;
+    } else {
+        defer->one.func = disarmed_defer;
+        defer->has_two_args = false;
+    }
+}
+
+void coro_defer_disarm(struct coro *coro, coro_deferred d)
+{
+    assert(d >= 0);
+
+    return coro_defer_disarm_internal(
+        coro, coro_defer_array_get_elem(&coro->defer, (size_t)d));
+}
+
+void coro_defer_fire_and_disarm(struct coro *coro, coro_deferred d)
+{
+    assert(d >= 0);
+
+    struct coro_defer *defer = coro_defer_array_get_elem(&coro->defer, (size_t)d);
+    assert(coro);
+
+    if (defer->has_two_args)
+        defer->two.func(defer->two.data1, defer->two.data2);
+    else
+        defer->one.func(defer->one.data);
+
+    return coro_defer_disarm_internal(coro, defer);
+}
+
+ALWAYS_INLINE coro_deferred
+coro_defer(struct coro *coro, defer1_func func, void *data)
 {
     struct coro_defer *defer = coro_defer_array_append(&coro->defer);
 
     if (UNLIKELY(!defer)) {
         lwan_status_error("Could not add new deferred function for coro %p",
                           coro);
-        return;
+        return -1;
     }
 
     defer->one.func = func;
     defer->one.data = data;
     defer->has_two_args = false;
+
+    return (coro_deferred)coro_defer_array_get_elem_index(&coro->defer, defer);
 }
 
-ALWAYS_INLINE void
+ALWAYS_INLINE coro_deferred
 coro_defer2(struct coro *coro, defer2_func func, void *data1, void *data2)
 {
     struct coro_defer *defer = coro_defer_array_append(&coro->defer);
@@ -416,13 +432,15 @@ coro_defer2(struct coro *coro, defer2_func func, void *data1, void *data2)
     if (UNLIKELY(!defer)) {
         lwan_status_error("Could not add new deferred function for coro %p",
                           coro);
-        return;
+        return -1;
     }
 
     defer->two.func = func;
     defer->two.data1 = data1;
     defer->two.data2 = data2;
     defer->has_two_args = true;
+
+    return (coro_deferred)coro_defer_array_get_elem_index(&coro->defer, defer);
 }
 
 void *coro_malloc_full(struct coro *coro,

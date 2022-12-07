@@ -1,6 +1,6 @@
 /*
- * lwan - simple web server
- * Copyright (c) 2012, 2013 Leandro A. F. Pereira <leandro@hardinfo.org>
+ * lwan - web server
+ * Copyright (c) 2012, 2013 L. A. F. Pereira <l@tia.mat.br>
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -39,7 +39,7 @@
 #include "lwan-config.h"
 #include "lwan-http-authorize.h"
 
-#if defined(HAVE_LUA)
+#if defined(LWAN_HAVE_LUA)
 #include "lwan-lua.h"
 #endif
 
@@ -56,16 +56,17 @@ static const struct lwan_config default_config = {
     .listener = "localhost:8080",
     .keep_alive_timeout = 15,
     .quiet = false,
-    .reuse_port = false,
     .proxy_protocol = false,
     .allow_cors = false,
     .expires = 1 * ONE_WEEK,
     .n_threads = 0,
     .max_post_data_size = 10 * DEFAULT_BUFFER_SIZE,
     .allow_post_temp_file = false,
+    .max_put_data_size = 10 * DEFAULT_BUFFER_SIZE,
+    .allow_put_temp_file = false,
 };
 
-LWAN_HANDLER(brew_coffee)
+LWAN_HANDLER_ROUTE(brew_coffee, NULL /* do not autodetect this route */)
 {
     /* Placeholder handler so that __start_lwan_handler and __stop_lwan_handler
      * symbols will get defined.
@@ -143,17 +144,17 @@ static bool can_override_header(const char *name)
     /* NOTE: Update lwan_prepare_response_header_full() in lwan-response.c
      *       if new headers are added here. */
 
-    if (!strcasecmp(name, "Date"))
+    if (strcaseequal_neutral(name, "Date"))
         return false;
-    if (!strcasecmp(name, "Expires"))
+    if (strcaseequal_neutral(name, "Expires"))
         return false;
-    if (!strcasecmp(name, "WWW-Authenticate"))
+    if (strcaseequal_neutral(name, "WWW-Authenticate"))
         return false;
-    if (!strcasecmp(name, "Connection"))
+    if (strcaseequal_neutral(name, "Connection"))
         return false;
-    if (!strcasecmp(name, "Content-Type"))
+    if (strcaseequal_neutral(name, "Content-Type"))
         return false;
-    if (!strcasecmp(name, "Transfer-Encoding"))
+    if (strcaseequal_neutral(name, "Transfer-Encoding"))
         return false;
     if (!strncasecmp(name, "Access-Control-Allow-",
                      sizeof("Access-Control-Allow-") - 1))
@@ -165,28 +166,32 @@ static bool can_override_header(const char *name)
 static void build_response_headers(struct lwan *l,
                                    const struct lwan_key_value *kv)
 {
+    struct lwan_strbuf strbuf;
     bool set_server = false;
 
     assert(l);
 
-    lwan_strbuf_init(&l->headers);
+    lwan_strbuf_init(&strbuf);
 
     for (; kv && kv->key; kv++) {
         if (!can_override_header(kv->key)) {
             lwan_status_warning("Cannot override header '%s'", kv->key);
         } else {
-            if (!strcasecmp(kv->key, "Server"))
+            if (strcaseequal_neutral(kv->key, "Server"))
                 set_server = true;
 
-            lwan_strbuf_append_printf(&l->headers, "\r\n%s: %s", kv->key,
+            lwan_strbuf_append_printf(&strbuf, "\r\n%s: %s", kv->key,
                                       kv->value);
         }
     }
 
     if (!set_server)
-        lwan_strbuf_append_strz(&l->headers, "\r\nServer: lwan");
+        lwan_strbuf_append_strz(&strbuf, "\r\nServer: lwan");
 
-    lwan_strbuf_append_strz(&l->headers, "\r\n\r\n");
+    lwan_strbuf_append_strz(&strbuf, "\r\n\r\n");
+
+    l->headers = (struct lwan_value){.value = lwan_strbuf_get_buffer(&strbuf),
+                                     .len = lwan_strbuf_get_length(&strbuf)};
 }
 
 static void parse_global_headers(struct config *c,
@@ -332,9 +337,18 @@ static void parse_listener_prefix(struct config *c,
 
     while ((l = config_read_line(c))) {
         switch (l->type) {
-        case CONFIG_LINE_TYPE_LINE:
-            hash_add(hash, strdup(l->key), strdup(l->value));
+        case CONFIG_LINE_TYPE_LINE: {
+            char *key_copy = strdup(l->key);
+            char *value_copy = strdup(l->value);
+
+            if (!key_copy)
+                lwan_status_critical("Could not copy key from config file");
+            if (!value_copy)
+                lwan_status_critical("Could not copy value from config file");
+
+            hash_add(hash, key_copy, value_copy);
             break;
+        }
 
         case CONFIG_LINE_TYPE_SECTION:
             if (streq(l->key, "authorization")) {
@@ -399,46 +413,159 @@ out:
     config_close(isolated);
 }
 
+static void register_url_map(struct lwan *l, const struct lwan_url_map *map)
+{
+    struct lwan_url_map *copy = add_url_map(&l->url_map_trie, NULL, map);
+
+    if (copy->module && copy->module->create) {
+        lwan_status_debug("Initializing module %s from struct",
+                          get_module_name(copy->module));
+
+        copy->data = copy->module->create(map->prefix, copy->args);
+        if (!copy->data) {
+            lwan_status_critical("Could not initialize module %s",
+                                 get_module_name(copy->module));
+        }
+
+        copy->flags = copy->module->flags;
+        copy->handler = copy->module->handle_request;
+    } else {
+        copy->flags = HANDLER_PARSE_MASK;
+    }
+}
+
 void lwan_set_url_map(struct lwan *l, const struct lwan_url_map *map)
 {
     lwan_trie_destroy(&l->url_map_trie);
     if (UNLIKELY(!lwan_trie_init(&l->url_map_trie, destroy_urlmap)))
         lwan_status_critical_perror("Could not initialize trie");
 
-    for (; map->prefix; map++) {
-        struct lwan_url_map *copy = add_url_map(&l->url_map_trie, NULL, map);
+    for (; map->prefix; map++)
+        register_url_map(l, map);
+}
 
-        if (copy->module && copy->module->create) {
-            lwan_status_debug("Initializing module %s from struct",
-                              get_module_name(copy->module));
+__attribute__((no_sanitize_address))
+void lwan_detect_url_map(struct lwan *l)
+{
+    const struct lwan_handler_info *iter;
 
-            copy->data = copy->module->create(map->prefix, copy->args);
-            if (!copy->data) {
-                lwan_status_critical("Could not initialize module %s",
-                                     get_module_name(copy->module));
-            }
+    lwan_trie_destroy(&l->url_map_trie);
+    if (UNLIKELY(!lwan_trie_init(&l->url_map_trie, destroy_urlmap)))
+        lwan_status_critical_perror("Could not initialize trie");
 
-            copy->flags = copy->module->flags;
-            copy->handler = copy->module->handle_request;
-        } else {
-            copy->flags = HANDLER_PARSE_MASK;
-        }
+    LWAN_SECTION_FOREACH(lwan_handler, iter) {
+        if (!iter->route)
+            continue;
+
+        const struct lwan_url_map map = {.prefix = iter->route,
+                                         .handler = iter->handler};
+        register_url_map(l, &map);
     }
 }
 
-static void parse_listener(struct config *c,
-                           const struct config_line *l,
-                           struct lwan *lwan)
+const char *lwan_get_config_path(char *path_buf, size_t path_buf_len)
 {
-    free(lwan->config.listener);
-    lwan->config.listener = strdup(l->value);
+    char buffer[PATH_MAX];
 
+    if (proc_pidpath(getpid(), buffer, sizeof(buffer)) < 0)
+        goto out;
+
+    char *path = strrchr(buffer, '/');
+    if (!path)
+        goto out;
+    int ret = snprintf(path_buf, path_buf_len, "%s.conf", path + 1);
+    if (ret < 0 || ret >= (int)path_buf_len)
+        goto out;
+
+    return path_buf;
+
+out:
+    return "lwan.conf";
+}
+
+static void parse_tls_listener(struct config *conf, const struct config_line *line, struct lwan *lwan)
+{
+#if !defined(LWAN_HAVE_MBEDTLS)
+    config_error(conf, "Lwan has been built without mbedTLS support");
+    return;
+#endif
+
+    lwan->config.tls_listener = strdup(line->value);
+    if (!lwan->config.tls_listener) {
+        config_error(conf, "Could not allocate memory for tls_listener");
+        return;
+    }
+
+    lwan->config.ssl.cert = NULL;
+    lwan->config.ssl.key = NULL;
+
+    while ((line = config_read_line(conf))) {
+        switch (line->type) {
+        case CONFIG_LINE_TYPE_SECTION_END:
+            if (!lwan->config.ssl.cert)
+                config_error(conf, "Missing path to certificate");
+            if (!lwan->config.ssl.key)
+                config_error(conf, "Missing path to private key");
+            return;
+        case CONFIG_LINE_TYPE_SECTION:
+            config_error(conf, "Unexpected section: %s", line->key);
+            return;
+        case CONFIG_LINE_TYPE_LINE:
+            if (streq(line->key, "cert")) {
+                free(lwan->config.ssl.cert);
+                lwan->config.ssl.cert = strdup(line->value);
+                if (!lwan->config.ssl.cert)
+                    return lwan_status_critical("Could not copy string");
+            } else if (streq(line->key, "key")) {
+                free(lwan->config.ssl.key);
+                lwan->config.ssl.key = strdup(line->value);
+                if (!lwan->config.ssl.key)
+                    return lwan_status_critical("Could not copy string");
+            } else if (streq(line->key, "hsts")) {
+                lwan->config.ssl.send_hsts_header = parse_bool(line->value, false);
+            } else {
+                config_error(conf, "Unexpected key: %s", line->key);
+            }
+        }
+    }
+
+    config_error(conf, "Expecting section end while parsing SSL configuration");
+}
+
+static void
+parse_listener(struct config *c, const struct config_line *l, struct lwan *lwan)
+{
+    lwan->config.listener = strdup(l->value);
+    if (!lwan->config.listener)
+        config_error(c, "Could not allocate memory for listener");
+
+    while ((l = config_read_line(c))) {
+        switch (l->type) {
+        case CONFIG_LINE_TYPE_LINE:
+            config_error(c, "Unexpected key %s", l->key);
+            return;
+        case CONFIG_LINE_TYPE_SECTION:
+            config_error(c, "Unexpected section %s", l->key);
+            return;
+        case CONFIG_LINE_TYPE_SECTION_END:
+            return;
+        }
+    }
+
+    config_error(c, "Unexpected EOF while parsing listener");
+}
+
+static void
+parse_site(struct config *c, const struct config_line *l, struct lwan *lwan)
+{
     while ((l = config_read_line(c))) {
         switch (l->type) {
         case CONFIG_LINE_TYPE_LINE:
             config_error(c, "Expecting prefix section");
             return;
         case CONFIG_LINE_TYPE_SECTION:
+            /* FIXME: per-site authorization? */
+
             if (l->key[0] == '&') {
                 void *handler = find_handler(l->key + 1);
                 if (handler) {
@@ -466,31 +593,13 @@ static void parse_listener(struct config *c,
     config_error(c, "Expecting section end while parsing listener");
 }
 
-const char *lwan_get_config_path(char *path_buf, size_t path_buf_len)
-{
-    char buffer[PATH_MAX];
-
-    if (proc_pidpath(getpid(), buffer, sizeof(buffer)) < 0)
-        goto out;
-
-    char *path = strrchr(buffer, '/');
-    if (!path)
-        goto out;
-    int ret = snprintf(path_buf, path_buf_len, "%s.conf", path + 1);
-    if (ret < 0 || ret >= (int)path_buf_len)
-        goto out;
-
-    return path_buf;
-
-out:
-    return "lwan.conf";
-}
-
 static bool setup_from_config(struct lwan *lwan, const char *path)
 {
     const struct config_line *line;
     struct config *conf;
+    bool has_site = false;
     bool has_listener = false;
+    bool has_tls_listener = false;
     char path_buf[PATH_MAX];
 
     if (!path)
@@ -513,9 +622,6 @@ static bool setup_from_config(struct lwan *lwan, const char *path)
             } else if (streq(line->key, "quiet")) {
                 lwan->config.quiet =
                     parse_bool(line->value, default_config.quiet);
-            } else if (streq(line->key, "reuse_port")) {
-                lwan->config.reuse_port =
-                    parse_bool(line->value, default_config.reuse_port);
             } else if (streq(line->key, "proxy_protocol")) {
                 lwan->config.proxy_protocol =
                     parse_bool(line->value, default_config.proxy_protocol);
@@ -544,25 +650,57 @@ static bool setup_from_config(struct lwan *lwan, const char *path)
                     config_error(conf,
                                  "Maximum post data can't be over 128MiB");
                 lwan->config.max_post_data_size = (size_t)max_post_data_size;
+            } else if (streq(line->key, "max_put_data_size")) {
+                long max_put_data_size = parse_long(
+                    line->value, (long)default_config.max_put_data_size);
+                if (max_put_data_size < 0)
+                    config_error(conf, "Negative maximum put data size");
+                else if (max_put_data_size > 128 * (1 << 20))
+                    config_error(conf,
+                                 "Maximum put data can't be over 128MiB");
+                lwan->config.max_put_data_size = (size_t)max_put_data_size;
             } else if (streq(line->key, "allow_temp_files")) {
-                lwan->config.allow_post_temp_file =
-                    !!strstr(line->value, "post");
+                bool has_post, has_put;
+
+                if (strstr(line->value, "all")) {
+                    has_post = has_put = true;
+                } else {
+                    has_post = !!strstr(line->value, "post");
+                    has_put = !!strstr(line->value, "put");
+                }
+
+                lwan->config.allow_post_temp_file = has_post;
+                lwan->config.allow_put_temp_file = has_put;
             } else {
                 config_error(conf, "Unknown config key: %s", line->key);
             }
             break;
         case CONFIG_LINE_TYPE_SECTION:
-            if (streq(line->key, "listener")) {
-                if (!has_listener) {
-                    parse_listener(conf, line, lwan);
-                    has_listener = true;
+            if (streq(line->key, "site")) {
+                if (!has_site) {
+                    parse_site(conf, line, lwan);
+                    has_site = true;
                 } else {
-                    config_error(conf, "Only one listener supported");
+                    config_error(conf, "Only one site may be configured");
                 }
             } else if (streq(line->key, "straitjacket")) {
                 lwan_straitjacket_enforce_from_config(conf);
             } else if (streq(line->key, "headers")) {
                 parse_global_headers(conf, lwan);
+            } else if (streq(line->key, "listener")) {
+                if (has_listener) {
+                    config_error(conf, "Listener already set up");
+                } else {
+                    parse_listener(conf, line, lwan);
+                    has_listener = true;
+                }
+            } else if (streq(line->key, "tls_listener")) {
+                if (has_tls_listener) {
+                    config_error(conf, "TLS Listener already set up");
+                } else {
+                    parse_tls_listener(conf, line, lwan);
+                    has_tls_listener = true;
+                }
             } else {
                 config_error(conf, "Unknown section type: %s", line->key);
             }
@@ -575,6 +713,7 @@ static bool setup_from_config(struct lwan *lwan, const char *path)
     if (config_last_error(conf)) {
         lwan_status_critical("Error on config file \"%s\", line %d: %s", path,
                              config_cur_line(conf), config_last_error(conf));
+        lwan_trie_destroy(&lwan->url_map_trie);
     }
 
     config_close(conf);
@@ -596,7 +735,8 @@ static void try_setup_from_config(struct lwan *l,
 
     l->config.request_flags =
         (l->config.proxy_protocol ? REQUEST_ALLOW_PROXY_REQS : 0) |
-        (l->config.allow_cors ? REQUEST_ALLOW_CORS : 0);
+        (l->config.allow_cors ? REQUEST_ALLOW_CORS : 0) |
+        (l->config.ssl.send_hsts_header ? REQUEST_WANTS_HSTS_HEADER : 0);
 }
 
 static rlim_t setup_open_file_count_limits(void)
@@ -686,6 +826,8 @@ void lwan_init_with_config(struct lwan *l, const struct lwan_config *config)
     memcpy(&l->config, config, sizeof(*config));
     l->config.listener = dup_or_null(l->config.listener);
     l->config.config_file_path = dup_or_null(l->config.config_file_path);
+    l->config.ssl.key = dup_or_null(l->config.ssl.key);
+    l->config.ssl.cert = dup_or_null(l->config.ssl.cert);
 
     /* Initialize status first, as it is used by other things during
      * their initialization. */
@@ -697,9 +839,14 @@ void lwan_init_with_config(struct lwan *l, const struct lwan_config *config)
     lwan_job_thread_init();
     lwan_tables_init();
 
+    /* Get the number of CPUs here because straightjacket might be active
+     * and this will block access to /proc and /sys, which will cause
+     * get_number_of_cpus() to get incorrect fallback values. */
+    get_number_of_cpus(l);
+
     try_setup_from_config(l, config);
 
-    if (!lwan_strbuf_get_length(&l->headers))
+    if (!l->headers.len)
         build_response_headers(l, config->global_headers);
 
     lwan_response_init(l);
@@ -707,7 +854,6 @@ void lwan_init_with_config(struct lwan *l, const struct lwan_config *config)
     /* Continue initialization as normal. */
     lwan_status_debug("Initializing lwan web server");
 
-    get_number_of_cpus(l);
     if (!l->config.n_threads) {
         l->thread.count = l->online_cpus;
         if (l->thread.count == 1)
@@ -739,7 +885,6 @@ void lwan_init_with_config(struct lwan *l, const struct lwan_config *config)
 
     lwan_readahead_init();
     lwan_thread_init(l);
-    lwan_socket_init(l);
     lwan_http_authorize_init();
 }
 
@@ -751,13 +896,18 @@ void lwan_shutdown(struct lwan *l)
     free(l->config.error_template);
     free(l->config.config_file_path);
 
+    lwan_always_bzero(l->config.ssl.cert, strlen(l->config.ssl.cert));
+    free(l->config.ssl.cert);
+    lwan_always_bzero(l->config.ssl.key, strlen(l->config.ssl.key));
+    free(l->config.ssl.key);
+
     lwan_job_thread_shutdown();
     lwan_thread_shutdown(l);
 
     lwan_status_debug("Shutting down URL handlers");
     lwan_trie_destroy(&l->url_map_trie);
 
-    lwan_strbuf_free(&l->headers);
+    free(l->headers.value);
     free(l->conns);
 
     lwan_response_shutdown(l);
@@ -767,106 +917,11 @@ void lwan_shutdown(struct lwan *l)
     lwan_readahead_shutdown();
 }
 
-static ALWAYS_INLINE int schedule_client(struct lwan *l, int fd)
-{
-    struct lwan_thread *thread = l->conns[fd].thread;
-
-    lwan_thread_add_client(thread, fd);
-
-    return (int)(thread - l->thread.threads);
-}
-
-static volatile sig_atomic_t main_socket = -1;
-
-static_assert(sizeof(main_socket) >= sizeof(int),
-              "size of sig_atomic_t > size of int");
-
-static void sigint_handler(int signal_number __attribute__((unused)))
-{
-    if (main_socket < 0)
-        return;
-
-    shutdown((int)main_socket, SHUT_RDWR);
-    close((int)main_socket);
-
-    main_socket = -1;
-}
-
-enum herd_accept { HERD_MORE = 0, HERD_GONE = -1, HERD_SHUTDOWN = 1 };
-
-struct core_bitmap {
-    uint64_t bitmap[4];
-};
-
-static ALWAYS_INLINE enum herd_accept
-accept_one(struct lwan *l, struct core_bitmap *cores)
-{
-    int fd = accept4((int)main_socket, NULL, NULL, SOCK_NONBLOCK | SOCK_CLOEXEC);
-
-    if (LIKELY(fd >= 0)) {
-        int core = schedule_client(l, fd);
-
-        cores->bitmap[core / 64] |= UINT64_C(1)<<(core % 64);
-
-        return HERD_MORE;
-    }
-
-    switch (errno) {
-    case EAGAIN:
-        return HERD_GONE;
-
-    case EBADF:
-    case ECONNABORTED:
-    case EINVAL:
-        if (main_socket < 0) {
-            lwan_status_info("Signal 2 (Interrupt) received");
-        } else {
-            lwan_status_info("Main socket closed for unknown reasons");
-        }
-        return HERD_SHUTDOWN;
-
-    default:
-        lwan_status_perror("accept");
-        return HERD_MORE;
-    }
-}
-
 void lwan_main_loop(struct lwan *l)
 {
-    struct core_bitmap cores = {};
-
-    assert(main_socket == -1);
-    main_socket = l->main_socket;
-
-    if (signal(SIGINT, sigint_handler) == SIG_ERR)
-        lwan_status_critical("Could not set signal handler");
-
     lwan_status_info("Ready to serve");
 
-    while (true) {
-        enum herd_accept ha;
-
-        fcntl(l->main_socket, F_SETFL, 0);
-        ha = accept_one(l, &cores);
-        if (ha == HERD_MORE) {
-            fcntl(l->main_socket, F_SETFL, O_NONBLOCK);
-
-            do {
-                ha = accept_one(l, &cores);
-            } while (ha == HERD_MORE);
-        }
-
-        if (UNLIKELY(ha > HERD_MORE))
-            break;
-
-        for (size_t i = 0; i < N_ELEMENTS(cores.bitmap); i++) {
-            for (uint64_t c = cores.bitmap[i]; c; c ^= c & -c) {
-                size_t core = (size_t)__builtin_ctzl(c);
-                lwan_thread_nudge(&l->thread.threads[i * 64 + core]);
-            }
-        }
-        cores = (struct core_bitmap){};
-    }
+    lwan_job_thread_main_loop();
 }
 
 #ifdef CLOCK_MONOTONIC_COARSE
